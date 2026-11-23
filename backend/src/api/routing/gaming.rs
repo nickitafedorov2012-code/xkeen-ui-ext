@@ -1210,19 +1210,21 @@ pub async fn ignore_gaming_conn(
     if target.is_empty() {
         return api_err("Не указана цель соединения (хост или IP:порт)");
     }
-    let _guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-    if body.remove {
-        cfg.gaming.ignored_game_conns.retain(|x| !x.eq_ignore_ascii_case(&target));
-    } else if !cfg.gaming.ignored_game_conns.iter().any(|x| x.eq_ignore_ascii_case(&target)) {
-        cfg.gaming.ignored_game_conns.push(target.clone());
-    }
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения config.json: {e}"));
-    }
-    let ignored_list = cfg.gaming.ignored_game_conns.clone();
+    let ignored_list = match state
+        .update_config(|cfg| {
+            if body.remove {
+                cfg.gaming.ignored_game_conns.retain(|x| !x.eq_ignore_ascii_case(&target));
+            } else if !cfg.gaming.ignored_game_conns.iter().any(|x| x.eq_ignore_ascii_case(&target)) {
+                cfg.gaming.ignored_game_conns.push(target.clone());
+            }
+            cfg.gaming.ignored_game_conns.clone()
+        })
+        .await
+    {
+        Ok((_, list)) => list,
+        Err(e) => return api_err(format!("Ошибка сохранения config.json: {e}")),
+    };
     let recent = crate::watchdog::get_recent_gaming_conns(&ignored_list);
-    *state.config.write().await = std::sync::Arc::new(cfg);
     api_ok(json!({
         "saved": true,
         "ignored_game_conns": ignored_list,

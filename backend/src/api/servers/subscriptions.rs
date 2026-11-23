@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{api_err, api_ok};
-use crate::{config, log_i, mihomo, transaction::ConfigTx, AppState};
+use crate::{log_i, mihomo, transaction::ConfigTx, AppState};
 #[derive(Deserialize)]
 pub struct RenameProviderReq {
     #[serde(alias = "id")]
@@ -58,17 +58,18 @@ pub async fn rename_provider(State(state): State<AppState>, Json(req): Json<Rena
         return api_err("ID подписки не может быть пустым");
     }
     let alias = req.alias.trim().to_string();
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut new_cfg = (**state.config.read().await).clone();
-    if alias.is_empty() {
-        new_cfg.provider_aliases.remove(&pid);
-    } else {
-        new_cfg.provider_aliases.insert(pid.clone(), alias.clone());
-    }
-    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
+    if let Err(e) = state
+        .update_config(|new_cfg| {
+            if alias.is_empty() {
+                new_cfg.provider_aliases.remove(&pid);
+            } else {
+                new_cfg.provider_aliases.insert(pid.clone(), alias.clone());
+            }
+        })
+        .await
+    {
         return api_err(format!("Ошибка сохранения: {e}"));
     }
-    *state.config.write().await = std::sync::Arc::new(new_cfg);
     let label = if alias.is_empty() {
         format!("Сброшено имя подписки '{pid}'")
     } else {
@@ -817,31 +818,46 @@ pub async fn connect_free_sub(
     State(state): State<AppState>,
     Json(req): Json<FreeSubConnectReq>,
 ) -> Response {
-    let cur = crate::free_sub::get_status().await;
-    if cur.running {
-        return api_ok(json!({
-            "started": false,
-            "already_running": true,
-            "status": cur,
-        }));
-    }
-    let st_clone = state.clone();
-    let mode = req.mode;
-    tokio::spawn(async move {
-        if let Err(e) = crate::free_sub::start_one_click_connect(st_clone, mode).await {
-            crate::log_e!("[FREE-SUB] Ошибка подключения ({mode:?}): {e}");
+    match crate::free_sub::spawn_one_click_connect(state, req.mode).await {
+        Ok(st) => api_ok(json!({
+            "started": true,
+            "mode": req.mode,
+            "status": st,
+        })),
+        Err(_) => {
+            let cur = crate::free_sub::get_status_for(req.mode).await;
+            api_ok(json!({
+                "started": false,
+                "already_running": true,
+                "status": cur,
+            }))
         }
-    });
-    api_ok(json!({
-        "started": true,
-        "mode": mode,
-    }))
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct FreeSubStatusQuery {
+    #[serde(default)]
+    pub mode: Option<crate::free_sub::FreeSubMode>,
 }
 
 /// GET /api/providers/free-sub/status — текущий статус и диагностика конвейера бесплатной подписки.
-pub async fn get_free_sub_status() -> Response {
-    let st = crate::free_sub::get_status().await;
-    api_ok(json!({ "status": st }))
+pub async fn get_free_sub_status(
+    axum::extract::Query(q): axum::extract::Query<FreeSubStatusQuery>,
+) -> Response {
+    let (vpn, whitelist) = crate::free_sub::get_all_statuses().await;
+    let st = match q.mode {
+        Some(crate::free_sub::FreeSubMode::Vpn) => vpn.clone(),
+        Some(crate::free_sub::FreeSubMode::Whitelist) => whitelist.clone(),
+        None => crate::free_sub::pick_primary_status(&vpn, &whitelist),
+    };
+    api_ok(json!({
+        "status": st,
+        "statuses": {
+            "vpn": vpn,
+            "whitelist": whitelist,
+        }
+    }))
 }
 
 #[derive(Deserialize)]
@@ -927,7 +943,12 @@ pub async fn blacklist_free_sub_node(
     Json(req): Json<FreeSubBlacklistReq>,
 ) -> Response {
     match crate::free_sub::blacklist_and_next(&state, req.mode, req.node_name.as_deref()).await {
-        Ok(node) => api_ok(json!({ "active_node": node, "mode": req.mode })),
+        Ok(res) => api_ok(json!({
+            "active_node": res.active_node,
+            "refill_started": res.refill_started,
+            "message": res.message,
+            "mode": req.mode,
+        })),
         Err(e) => api_err(e),
     }
 }
@@ -937,16 +958,13 @@ pub async fn refill_free_sub(
     State(state): State<AppState>,
     Json(req): Json<FreeSubModeReq>,
 ) -> Response {
-    let cur = crate::free_sub::get_status().await;
-    if cur.running {
-        return api_ok(json!({ "started": false, "already_running": true, "status": cur }));
+    match crate::free_sub::spawn_background_refill(state, req.mode).await {
+        Ok(st) => api_ok(json!({ "started": true, "mode": req.mode, "status": st })),
+        Err(_) => {
+            let cur = crate::free_sub::get_status_for(req.mode).await;
+            api_ok(json!({ "started": false, "already_running": true, "status": cur }))
+        }
     }
-    let st_clone = state.clone();
-    let mode = req.mode;
-    tokio::spawn(async move {
-        let _ = crate::free_sub::start_background_refill(st_clone, mode).await;
-    });
-    api_ok(json!({ "started": true, "mode": mode }))
 }
 
 /// GET /api/providers/free-sub/pool — список узлов пула, счётчик и история сессий.

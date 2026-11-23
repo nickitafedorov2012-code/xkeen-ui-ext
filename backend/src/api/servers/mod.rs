@@ -66,20 +66,22 @@ pub async fn set_server_alias(
     State(state): State<AppState>,
     Json(req): Json<ServerAliasReq>,
 ) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-    let alias_trimmed = req.alias.trim();
-    if alias_trimmed.is_empty() {
-        cfg.server_aliases.remove(&req.server_id);
-    } else {
-        cfg.server_aliases.insert(req.server_id.clone(), alias_trimmed.to_string());
-    }
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения алиаса сервера: {e}"));
-    }
-    let aliases = cfg.server_aliases.clone();
-    *state.config.write().await = std::sync::Arc::new(cfg);
-    log_i!("Алиас сервера '{}' установлен в '{}'", req.server_id, alias_trimmed);
+    let aliases = match state
+        .update_config(|cfg| {
+            let alias_trimmed = req.alias.trim();
+            if alias_trimmed.is_empty() {
+                cfg.server_aliases.remove(&req.server_id);
+            } else {
+                cfg.server_aliases.insert(req.server_id.clone(), alias_trimmed.to_string());
+            }
+            cfg.server_aliases.clone()
+        })
+        .await
+    {
+        Ok((_, aliases)) => aliases,
+        Err(e) => return api_err(format!("Ошибка сохранения алиаса сервера: {e}")),
+    };
+    log_i!("Алиас сервера '{}' установлен в '{}'", req.server_id, req.alias.trim());
     api_ok(json!({ "server_aliases": aliases }))
 }
 
@@ -186,54 +188,55 @@ pub async fn set_server_whitelist(
     State(state): State<AppState>,
     Json(req): Json<ServerWhitelistReq>,
 ) -> Response {
-    let (cfg, wl, nl, wl_p) = {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        if let Some(servers) = req.servers {
-            cfg.whitelist_servers = servers;
-        } else if let Some(add_servers) = req.add_servers {
-            cfg.whitelist_servers = merge_whitelist_servers(&cfg.whitelist_servers, &add_servers);
-            for s in &add_servers {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    cfg.normal_servers.retain(|n| n != trimmed);
+    let (cfg, (wl, nl, wl_p)) = match state
+        .update_config(|cfg| {
+            if let Some(servers) = req.servers {
+                cfg.whitelist_servers = servers;
+            } else if let Some(add_servers) = req.add_servers {
+                cfg.whitelist_servers = merge_whitelist_servers(&cfg.whitelist_servers, &add_servers);
+                for s in &add_servers {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        cfg.normal_servers.retain(|n| n != trimmed);
+                    }
                 }
-            }
-        } else if let Some(server_id) = req.server_id {
-            if let Some(is_normal) = req.normal {
-                if is_normal {
-                    cfg.whitelist_servers.retain(|s| s != &server_id);
-                    if !cfg.normal_servers.contains(&server_id) {
-                        cfg.normal_servers.push(server_id);
+            } else if let Some(server_id) = req.server_id {
+                if let Some(is_normal) = req.normal {
+                    if is_normal {
+                        cfg.whitelist_servers.retain(|s| s != &server_id);
+                        if !cfg.normal_servers.contains(&server_id) {
+                            cfg.normal_servers.push(server_id);
+                        }
+                    } else {
+                        cfg.normal_servers.retain(|s| s != &server_id);
                     }
                 } else {
-                    cfg.normal_servers.retain(|s| s != &server_id);
-                }
-            } else {
-                let enable = req.enabled.unwrap_or(true);
-                if enable {
-                    cfg.normal_servers.retain(|s| s != &server_id);
-                    if !cfg.whitelist_servers.contains(&server_id) {
-                        cfg.whitelist_servers.push(server_id);
-                    }
-                } else {
-                    cfg.whitelist_servers.retain(|s| s != &server_id);
-                    if !cfg.normal_servers.contains(&server_id) {
-                        cfg.normal_servers.push(server_id);
+                    let enable = req.enabled.unwrap_or(true);
+                    if enable {
+                        cfg.normal_servers.retain(|s| s != &server_id);
+                        if !cfg.whitelist_servers.contains(&server_id) {
+                            cfg.whitelist_servers.push(server_id);
+                        }
+                    } else {
+                        cfg.whitelist_servers.retain(|s| s != &server_id);
+                        if !cfg.normal_servers.contains(&server_id) {
+                            cfg.normal_servers.push(server_id);
+                        }
                     }
                 }
             }
-        }
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
-        }
-        let wl = cfg.whitelist_servers.clone();
-        let nl = cfg.normal_servers.clone();
-        let wl_p = cfg.whitelist_providers.clone();
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-        log_i!("Обновлён список серверов белых списков (всего БС: {}, обычных: {})", wl.len(), nl.len());
-        (cfg, wl, nl, wl_p)
+            (
+                cfg.whitelist_servers.clone(),
+                cfg.normal_servers.clone(),
+                cfg.whitelist_providers.clone(),
+            )
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return api_err(format!("Ошибка сохранения белого списка серверов: {e}")),
     };
+    log_i!("Обновлён список серверов белых списков (всего БС: {}, обычных: {})", wl.len(), nl.len());
 
     if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
         failover::handle_whitelist_transition(
@@ -269,33 +272,31 @@ pub async fn set_provider_whitelist(
     State(state): State<AppState>,
     Json(req): Json<ProviderWhitelistReq>,
 ) -> Response {
-    let (cfg, wl_p, wl_s) = {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        if let Some(providers) = req.providers {
-            cfg.whitelist_providers = providers;
-        } else if let Some(add_providers) = req.add_providers {
-            cfg.whitelist_providers = merge_whitelist_providers(&cfg.whitelist_providers, &add_providers);
-        } else if let Some(provider_id) = req.provider_id.or(req.provider) {
-            let enable = req.enabled.unwrap_or(true);
-            let pid_lower = provider_id.trim().to_lowercase();
-            if enable {
-                if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == pid_lower) {
-                    cfg.whitelist_providers.push(provider_id);
+    let (cfg, (wl_p, wl_s)) = match state
+        .update_config(|cfg| {
+            if let Some(providers) = req.providers {
+                cfg.whitelist_providers = providers;
+            } else if let Some(add_providers) = req.add_providers {
+                cfg.whitelist_providers = merge_whitelist_providers(&cfg.whitelist_providers, &add_providers);
+            } else if let Some(provider_id) = req.provider_id.or(req.provider) {
+                let enable = req.enabled.unwrap_or(true);
+                let pid_lower = provider_id.trim().to_lowercase();
+                if enable {
+                    if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == pid_lower) {
+                        cfg.whitelist_providers.push(provider_id);
+                    }
+                } else {
+                    cfg.whitelist_providers.retain(|p| p.trim().to_lowercase() != pid_lower);
                 }
-            } else {
-                cfg.whitelist_providers.retain(|p| p.trim().to_lowercase() != pid_lower);
             }
-        }
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения белого списка подписок: {e}"));
-        }
-        let wl_p = cfg.whitelist_providers.clone();
-        let wl_s = cfg.whitelist_servers.clone();
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-        log_i!("Обновлён список подписок белых списков (всего: {})", wl_p.len());
-        (cfg, wl_p, wl_s)
+            (cfg.whitelist_providers.clone(), cfg.whitelist_servers.clone())
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return api_err(format!("Ошибка сохранения белого списка подписок: {e}")),
     };
+    log_i!("Обновлён список подписок белых списков (всего: {})", wl_p.len());
 
     if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
         failover::handle_whitelist_transition(
@@ -358,16 +359,18 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
         } else {
             crate::free_sub::FreeSubMode::Vpn
         };
-        if let Ok(node) = crate::free_sub::switch_pool_node(state, mode, "next").await {
-            return Ok(format!("Подключён узел {node}"));
-        }
-        let st_clone = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::free_sub::start_one_click_connect(st_clone, mode).await {
-                log_e!("[FREE-SUB] Фоновый запуск подключения ({mode:?}) завершился ошибкой: {e}");
+        if !crate::free_sub::is_mode_active(state, mode).await {
+            if let Ok(node) = crate::free_sub::connect_pool_node(state, mode).await {
+                return Ok(format!("Подключён узел {node}"));
             }
-        });
-        return Ok("Запущен поиск и проверка рабочих узлов…".into());
+            let _ = crate::free_sub::spawn_one_click_connect(state.clone(), mode).await;
+            return Ok("Запущен поиск и проверка рабочих узлов…".into());
+        }
+        if let Ok(node) = crate::free_sub::switch_pool_node(state, mode, "next").await {
+            return Ok(format!("Переключён на узел {node}"));
+        }
+        let _ = crate::free_sub::spawn_background_refill(state.clone(), mode).await;
+        return Ok("В пуле нет другого узла — запущен добор свежих узлов…".into());
     }
     let to_vkturn = server_id == crate::vkturn::PROXY_NAME;
     if to_vkturn {
@@ -398,34 +401,33 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
             // - Ручной выбор обычного VPS: обновляет priority_chain и сохраняет last_good_regular_vps
             // - Ручной выбор сервера [БС]: обновляет только bs_priority_chain, никогда не затирая priority_chain обычных VPS
             if !server_id.is_empty() && server_id != "Fastest" && server_id != "Fallback" {
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut mut_cfg = (**state.config.read().await).clone();
                 let id = server_id.to_string();
-                let is_bs = failover::is_whitelist_server_full(&srv_name, server_id, srv_prov.as_deref(), &mut_cfg);
+                if let Err(e) = state
+                    .update_config(|mut_cfg| {
+                        let is_bs = failover::is_whitelist_server_full(&srv_name, server_id, srv_prov.as_deref(), mut_cfg);
 
-                if is_bs {
-                    if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &id) {
-                        mut_cfg.failover.bs_priority_chain.remove(pos);
-                    }
-                    mut_cfg.failover.bs_priority_chain.insert(0, id.clone());
-                } else {
-                    if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
-                        mut_cfg.failover.priority_chain.remove(pos);
-                    }
-                    mut_cfg.failover.priority_chain.insert(0, id.clone());
-                    mut_cfg.failover.priority_server = id.clone();
-                    mut_cfg.failover.last_good_regular_vps = Some(id.clone());
-                }
-                // Синхронизируем цель 🛡️ Whitelist для любого вручную выбранного сервера (и БС, и обычного VPS),
-                // чтобы исключить рассинхрон между PROXY и 🛡️ Whitelist.
-                if mut_cfg.whitelist.enabled {
-                    mut_cfg.whitelist.target_server = Some(id.clone());
-                }
-
-                if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+                        if is_bs {
+                            if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &id) {
+                                mut_cfg.failover.bs_priority_chain.remove(pos);
+                            }
+                            mut_cfg.failover.bs_priority_chain.insert(0, id.clone());
+                        } else {
+                            if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
+                                mut_cfg.failover.priority_chain.remove(pos);
+                            }
+                            mut_cfg.failover.priority_chain.insert(0, id.clone());
+                            mut_cfg.failover.priority_server = id.clone();
+                            mut_cfg.failover.last_good_regular_vps = Some(id.clone());
+                        }
+                        // Синхронизируем цель 🛡️ Whitelist для любого вручную выбранного сервера (и БС, и обычного VPS),
+                        // чтобы исключить рассинхрон между PROXY и 🛡️ Whitelist.
+                        if mut_cfg.whitelist.enabled {
+                            mut_cfg.whitelist.target_server = Some(id);
+                        }
+                    })
+                    .await
+                {
                     log_e!("Ошибка сохранения приоритета в config.json: {e}");
-                } else {
-                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
                 }
             }
             // Баг #16: всегда синхронизируем группу 🛡️ Whitelist в рантайме с выбранным узлом,
@@ -627,15 +629,13 @@ pub async fn switch_flow_server(
         Ok(msg) => {
             log_i!("[Google Flow] {}", msg);
             // Сохраняем flow_server в config.json БЕЗ изменения failover.priority_server / priority_chain!
+            if let Err(e) = state
+                .update_config(|mut_cfg| {
+                    mut_cfg.flow_server = Some(srv_id.to_string());
+                })
+                .await
             {
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut mut_cfg = (**state.config.read().await).clone();
-                mut_cfg.flow_server = Some(srv_id.to_string());
-                if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
-                    log_e!("Ошибка сохранения flow_server в config.json: {e}");
-                } else {
-                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
-                }
+                log_e!("Ошибка сохранения flow_server в config.json: {e}");
             }
             api_ok(json!({ "message": msg, "flow_server": srv_id }))
         }
@@ -899,17 +899,16 @@ pub async fn auto_select_flow_server(
         }
     }
 
+    if let Err(e) = state
+        .update_config(|mut_cfg| {
+            mut_cfg.flow_auto_select = target_enabled;
+            if let Some(ref target) = best_server_id {
+                mut_cfg.flow_server = Some(target.clone());
+            }
+        })
+        .await
     {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut mut_cfg = (**state.config.read().await).clone();
-        mut_cfg.flow_auto_select = target_enabled;
-        if let Some(ref target) = best_server_id {
-            mut_cfg.flow_server = Some(target.clone());
-        }
-        if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
-            return api_err(format!("Ошибка сохранения: {e}"));
-        }
-        *state.config.write().await = std::sync::Arc::new(mut_cfg);
+        return api_err(format!("Ошибка сохранения: {e}"));
     }
 
     api_ok(json!({
@@ -999,47 +998,43 @@ pub async fn whitelist_detector_detect_servers(
     };
 
     if req.apply.unwrap_or(false) {
-        let cfg = {
-            let _cfg_guard = state.config_lock.lock().await;
-            let mut cfg = (**state.config.read().await).clone();
-
-            // 1. Добавляем обнаруженные BS провайдеры в whitelist_providers (дедупликация)
-            for wp in &detect_res.detected_bs_providers {
-                let wp_lower = wp.trim().to_lowercase();
-                if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == wp_lower) {
-                    cfg.whitelist_providers.push(wp.clone());
+        let (cfg, _) = match state
+            .update_config(|cfg| {
+                // 1. Добавляем обнаруженные BS провайдеры в whitelist_providers (дедупликация)
+                for wp in &detect_res.detected_bs_providers {
+                    let wp_lower = wp.trim().to_lowercase();
+                    if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == wp_lower) {
+                        cfg.whitelist_providers.push(wp.clone());
+                    }
                 }
-            }
 
-            // 2. Добавляем обнаруженные узлы БС в whitelist_servers (дедупликация)
-            for ws in &detect_res.detected_bs_servers {
-                if !cfg.whitelist_servers.iter().any(|s| s == ws) {
-                    cfg.whitelist_servers.push(ws.clone());
+                // 2. Добавляем обнаруженные узлы БС в whitelist_servers (дедупликация)
+                for ws in &detect_res.detected_bs_servers {
+                    if !cfg.whitelist_servers.iter().any(|s| s == ws) {
+                        cfg.whitelist_servers.push(ws.clone());
+                    }
                 }
-            }
 
-            // 3. Если monitored_provider пуст, заполняем suggested_monitored_provider
-            if cfg.failover.whitelist_detector.monitored_provider.trim().is_empty() {
-                if let Some(ref sug) = detect_res.suggested_monitored_provider {
-                    cfg.failover.whitelist_detector.monitored_provider = sug.clone();
+                // 3. Если monitored_provider пуст, заполняем suggested_monitored_provider
+                if cfg.failover.whitelist_detector.monitored_provider.trim().is_empty() {
+                    if let Some(ref sug) = detect_res.suggested_monitored_provider {
+                        cfg.failover.whitelist_detector.monitored_provider = sug.clone();
+                    }
                 }
-            }
 
-            // 4. Если target_bs_provider пуст, заполняем suggested_target_bs_provider
-            if cfg.failover.whitelist_detector.target_bs_provider.trim().is_empty() {
-                if let Some(ref sug) = detect_res.suggested_target_bs_provider {
-                    cfg.failover.whitelist_detector.target_bs_provider = sug.clone();
+                // 4. Если target_bs_provider пуст, заполняем suggested_target_bs_provider
+                if cfg.failover.whitelist_detector.target_bs_provider.trim().is_empty() {
+                    if let Some(ref sug) = detect_res.suggested_target_bs_provider {
+                        cfg.failover.whitelist_detector.target_bs_provider = sug.clone();
+                    }
                 }
-            }
-
-            if let Err(e) = config::save(&state.config_path, &cfg).await {
-                return api_err(format!("Ошибка сохранения конфигурации при автонастройке БС: {e}"));
-            }
-
-            *state.config.write().await = std::sync::Arc::new(cfg.clone());
-            log_i!("[DETECTOR] Автоматически применены настройки обнаруженных БС узлов и провайдеров");
-            cfg
+            })
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return api_err(format!("Ошибка сохранения конфигурации при автонастройке БС: {e}")),
         };
+        log_i!("[DETECTOR] Автоматически применены настройки обнаруженных БС узлов и провайдеров");
 
         if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
             failover::handle_whitelist_transition(
@@ -1101,15 +1096,15 @@ pub struct FailoverToggleReq {
 
 /// POST /api/failover/toggle — быстрое включение/отключение failover.
 pub async fn failover_toggle(State(state): State<AppState>, Json(req): Json<FailoverToggleReq>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-    cfg.failover.enabled = req.enabled;
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
+    if let Err(e) = state
+        .update_config(|cfg| {
+            cfg.failover.enabled = req.enabled;
+        })
+        .await
+    {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
-    *state.config.write().await = std::sync::Arc::new(cfg);
     log_i!("Failover переключён: enabled={}", req.enabled);
-    drop(_cfg_guard);
     reapply_canary_routing(&state).await;
     api_ok(json!({ "enabled": req.enabled }))
 }
@@ -1127,8 +1122,6 @@ pub struct PriorityReq {
 
 /// POST /api/settings/priority — задать/снять глобальную цепочку приоритетов.
 pub async fn set_priority(State(state): State<AppState>, Json(req): Json<PriorityReq>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
     // Совместимость: если пришёл только server_id — цепочка из одного элемента.
     let chain: Vec<String> = if !req.server_ids.is_empty() {
         req.server_ids
@@ -1138,38 +1131,42 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
             None => Vec::new(),
         }
     };
-    // id сохраняем ровно как прислал фронт (s.id из GET /api/servers) —
-    // trim() ломал совпадение с id серверов (эмодзи/пробелы в именах).
-    cfg.failover.priority_chain = chain;
-    cfg.failover.migrate_priority();
-    if let Some(en) = req.enabled {
-        cfg.failover.enabled = en;
-    }
-    let message = if cfg.failover.priority_chain.is_empty() {
-        "Приоритет снят".to_string()
-    } else {
-        let names: Vec<String> = cfg
-            .failover
-            .priority_chain
-            .iter()
-            .map(|id| {
-                if id == "Fastest" || id == "Fallback" {
-                    id.clone()
-                } else {
-                    mihomo::display_name(id)
-                }
-            })
-            .collect();
-        format!("Цепочка приоритета: {}", names.join(" → "))
+    let (cfg, message) = match state
+        .update_config(|cfg| {
+            // id сохраняем ровно как прислал фронт (s.id из GET /api/servers) —
+            // trim() ломал совпадение с id серверов (эмодзи/пробелы в именах).
+            cfg.failover.priority_chain = chain;
+            cfg.failover.migrate_priority();
+            if let Some(en) = req.enabled {
+                cfg.failover.enabled = en;
+            }
+            if cfg.failover.priority_chain.is_empty() {
+                "Приоритет снят".to_string()
+            } else {
+                let names: Vec<String> = cfg
+                    .failover
+                    .priority_chain
+                    .iter()
+                    .map(|id| {
+                        if id == "Fastest" || id == "Fallback" {
+                            id.clone()
+                        } else {
+                            mihomo::display_name(id)
+                        }
+                    })
+                    .collect();
+                format!("Цепочка приоритета: {}", names.join(" → "))
+            }
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return api_err(format!("Ошибка сохранения: {e}")),
     };
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения: {e}"));
-    }
-    *state.config.write().await = std::sync::Arc::new(cfg.clone());
     failover::clear_all_quarantine().await;
     // PING-AUTO: после правки цепочки приоритета пинги обновляются сразу,
     // а не при следующем ручном действии в панели
-    spawn_ping_refresh(state.http.clone(), cfg);
+    spawn_ping_refresh(state.http.clone(), (*cfg).clone());
     api_ok(json!({ "saved": true, "message": message }))
 }
 

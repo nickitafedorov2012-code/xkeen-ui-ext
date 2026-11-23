@@ -1543,11 +1543,18 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
 
 /// POST /api/settings/reset — полный сброс настроек панели к значениям по умолчанию (с сохранением auth).
 pub async fn reset_settings(State(state): State<AppState>) -> Response {
+    crate::free_sub::reset_free_sub_runtime_and_cache(&state).await;
+
+    let pre_cfg = state.config.read().await.clone();
+    let mihomo_online = mihomo::get_version(&state.http, &pre_cfg).await.is_some();
+
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
     };
     let old_mihomo_path = tx.config().mihomo.config_path.clone();
+    let old_mihomo_host = tx.config().mihomo.host.clone();
+    let old_mihomo_port = tx.config().mihomo.port;
     let old_adguard_path = tx.config().adguard.config_path.clone();
     let old_xkeen_init = tx.config().system.xkeen_init.clone();
     let old_auth = tx.config().auth.clone();
@@ -1556,6 +1563,12 @@ pub async fn reset_settings(State(state): State<AppState>) -> Response {
     if !old_mihomo_path.is_empty() {
         defaults.mihomo.config_path = old_mihomo_path;
     }
+    if !old_mihomo_host.is_empty() {
+        defaults.mihomo.host = old_mihomo_host;
+    }
+    if old_mihomo_port > 0 {
+        defaults.mihomo.port = old_mihomo_port;
+    }
     if !old_adguard_path.is_empty() {
         defaults.adguard.config_path = old_adguard_path;
     }
@@ -1563,10 +1576,22 @@ pub async fn reset_settings(State(state): State<AppState>) -> Response {
         defaults.system.xkeen_init = old_xkeen_init;
     }
     defaults.auth = old_auth;
+    if !super::is_nfqws1_available() && !super::is_nfqws2_available() {
+        defaults.zapret.enabled = false;
+    }
     *tx.config_mut() = defaults;
 
     let mut ports = crate::routing::redir_ports("");
-    if let Ok(yaml) = tx.read_yaml().await {
+    if let Ok(mut yaml) = tx.read_yaml().await {
+        for pid in [
+            crate::free_sub::FREE_WL_PROVIDER_ID,
+            crate::free_sub::FREE_VPN_PROVIDER_ID,
+            crate::routing::FREE_SUB_PROBE_PROVIDER_ID,
+        ] {
+            if let Ok(cleaned) = crate::routing::delete_provider_from_yaml(&yaml, pid) {
+                yaml = cleaned;
+            }
+        }
         ports = crate::routing::redir_ports(&yaml);
         if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
             ports = crate::routing::redir_ports(&new_yaml);
@@ -1574,16 +1599,40 @@ pub async fn reset_settings(State(state): State<AppState>) -> Response {
         }
     }
     let reset_cfg = tx.config().clone();
-    if let Err(e) = tx.commit_without_reload().await {
+    let commit_res = if mihomo_online {
+        tx.commit_and_reload().await
+    } else {
+        tx.commit_without_reload().await
+    };
+    if let Err(e) = commit_res {
         return api_err(format!("Ошибка сброса настроек: {e}"));
     }
     drop(tx);
+
+    if let Some(prov_dir) = std::path::Path::new(&reset_cfg.mihomo.config_path)
+        .parent()
+        .map(|p| p.join("providers"))
+    {
+        for pid in [
+            crate::free_sub::FREE_WL_PROVIDER_ID,
+            crate::free_sub::FREE_VPN_PROVIDER_ID,
+            crate::routing::FREE_SUB_PROBE_PROVIDER_ID,
+        ] {
+            let _ = tokio::fs::remove_file(prov_dir.join(format!("{pid}.yaml"))).await;
+        }
+    }
+
+    if mihomo_online {
+        mihomo::invalidate_proxies_cache();
+        let _ = mihomo::switch_server(&state.http, &reset_cfg, "DIRECT").await;
+    }
 
     let dns_port = resolve_active_dns_port(&reset_cfg);
     if let Err(e) = sync_full_tunnel_modes(&reset_cfg, ports.redir, ports.tproxy, dns_port).await {
         log_w!("[RESET] Предупреждение синхронизации режимов при сбросе: {e}");
     }
     crate::traffic::set_whitelist_active(false);
+    crate::free_sub::reset_free_sub_runtime_and_cache(&state).await;
     log_i!("Настройки панели полностью сброшены к значениям по умолчанию (auth сохранён)");
     api_ok(json!({ "reset": true }))
 }
@@ -1796,5 +1845,120 @@ mod tests {
         assert!(on_disk.auth.enabled, "AUDIT-024: auth.enabled должен сохраняться при сбросе");
         assert_eq!(on_disk.auth.password_hash, "pbkdf2$test_hash", "AUDIT-024: password_hash должен сохраняться");
         assert_eq!(on_disk.auth.session_secret, "test_secret_keep", "AUDIT-024: auth.session_secret должен сохраняться");
+    }
+
+    #[tokio::test]
+    async fn regression_reset_settings_cleans_free_sub_cache_providers_and_reloads_mihomo() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("xkeen_reset_full_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        let cache_path = crate::free_sub::cache_file_path(&cfg_path);
+
+        let initial_yaml = "\
+mixed-port: 7892
+proxy-providers:
+  free_wl:
+    type: file
+    path: \"./providers/free_wl.yaml\"
+  free_vpn:
+    type: file
+    path: \"./providers/free_vpn.yaml\"
+  __free_sub_probe:
+    type: file
+    path: \"./providers/__free_sub_probe.yaml\"
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [DIRECT]
+    use:
+      - free_wl
+      - free_vpn
+rules:
+  - MATCH,PROXY
+";
+        tokio::fs::write(&yaml_path, initial_yaml).await.unwrap();
+        tokio::fs::write(&prov_dir.join("free_wl.yaml"), "proxies: []\n").await.unwrap();
+        tokio::fs::write(&prov_dir.join("free_vpn.yaml"), "proxies: []\n").await.unwrap();
+        tokio::fs::write(&prov_dir.join("__free_sub_probe.yaml"), "proxies: []\n").await.unwrap();
+        tokio::fs::write(&cache_path, "{}").await.unwrap();
+
+        let reloaded = std::sync::Arc::new(AtomicBool::new(false));
+        let switched_direct = std::sync::Arc::new(AtomicBool::new(false));
+        let rel_srv = reloaded.clone();
+        let dir_srv = switched_direct.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let rel_srv = rel_srv.clone();
+                let dir_srv = dir_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("GET /version") {
+                        ("200 OK", r#"{"version":"v1.19.34"}"#.to_string())
+                    } else if first_line.starts_with("GET /proxies") {
+                        ("200 OK", serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "name": "PROXY", "type": "Selector", "now": "some-node", "all": ["DIRECT", "some-node"] },
+                                "DIRECT": { "name": "DIRECT", "type": "Direct" }
+                            }
+                        }).to_string())
+                    } else if first_line.starts_with("PUT /configs") {
+                        rel_srv.store(true, Ordering::SeqCst);
+                        ("204 No Content", String::new())
+                    } else if first_line.starts_with("PUT /proxies/PROXY") {
+                        if req.contains("\"DIRECT\"") {
+                            dir_srv.store(true, Ordering::SeqCst);
+                        }
+                        ("204 No Content", String::new())
+                    } else {
+                        ("200 OK", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist_providers = vec!["free_wl".into()];
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let state = make_n_test_state(cfg, cfg_path.clone());
+        let resp = reset_settings(State(state.clone())).await;
+        srv.abort();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        assert!(!cache_path.exists(), "free_sub_cache.json должен быть удалён при сбросе");
+        assert!(!prov_dir.join("free_wl.yaml").exists(), "free_wl.yaml должен быть удалён");
+        assert!(!prov_dir.join("free_vpn.yaml").exists(), "free_vpn.yaml должен быть удалён");
+        assert!(!prov_dir.join("__free_sub_probe.yaml").exists(), "__free_sub_probe.yaml должен быть удалён");
+
+        let final_yaml = tokio::fs::read_to_string(&yaml_path).await.unwrap();
+        let provs = crate::routing::parse_provider_names(&final_yaml);
+        assert!(provs.is_empty(), "провайдеры free_wl/free_vpn/__free_sub_probe должны быть удалены из config.yaml: {provs:?}");
+        assert!(reloaded.load(Ordering::SeqCst), "reset_settings должен делать reload Mihomo");
+        assert!(switched_direct.load(Ordering::SeqCst), "reset_settings должен возвращать PROXY в DIRECT");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

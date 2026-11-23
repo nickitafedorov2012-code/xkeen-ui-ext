@@ -119,7 +119,7 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
     let v1_inst = is_nfqws1_available();
     let v2_inst = is_nfqws2_available();
     let (engine, cur_ver, last_checked, update_avail, latest_ver) = {
-        let cfg = state.config.read().await;
+        let cfg = state.cfg_snapshot().await;
         let eng = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
             "v1"
         } else if v2_inst {
@@ -252,15 +252,13 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
         final_latest
     };
 
-    {
-        let _guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.last_update_check = Some(now_str.clone());
-        cfg.zapret.update_available = update_available;
-        cfg.zapret.latest_version = Some(display_latest.clone());
-        let _ = crate::config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg);
-    }
+    let _ = state
+        .update_config(|cfg| {
+            cfg.zapret.last_update_check = Some(now_str.clone());
+            cfg.zapret.update_available = update_available;
+            cfg.zapret.latest_version = Some(display_latest.clone());
+        })
+        .await;
 
     let label = if engine == "v2" {
         format!("Zapret 2 {cur_ver}")

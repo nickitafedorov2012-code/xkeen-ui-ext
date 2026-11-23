@@ -548,7 +548,7 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
     if updated_gaming {
         let ports = routing::redir_ports(&new_yaml);
         let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
-        let cfg_guard = state.config.read().await;
+        let cfg_guard = state.cfg_snapshot().await;
         let dns_port = resolve_active_dns_port(&cfg_guard);
         if let Err(e) = sync_full_tunnel_modes(&cfg_guard, redir_port, tproxy_port, dns_port).await {
             return api_err(format!("Маршруты устройств сохранены, но не удалось применить iptables: {e}"));

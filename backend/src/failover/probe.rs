@@ -969,22 +969,20 @@ pub async fn evaluate_and_apply_whitelist_detector(
                             handle_whitelist_transition(state, &target_id, &target_name, s_prov).await;
 
                             // Обновляем конфиг с last_good_regular_vps и bs_priority_chain
+                            if let Err(e) = state
+                                .update_config(|mut_cfg| {
+                                    mut_cfg.failover.last_good_regular_vps = last_good.clone();
+                                    if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &target_id) {
+                                        mut_cfg.failover.bs_priority_chain.remove(pos);
+                                    }
+                                    mut_cfg.failover.bs_priority_chain.insert(0, target_id.clone());
+                                    if mut_cfg.whitelist.enabled {
+                                        mut_cfg.whitelist.target_server = Some(target_id.clone());
+                                    }
+                                })
+                                .await
                             {
-                                let _cfg_guard = state.config_lock.lock().await;
-                                let mut mut_cfg = (**state.config.read().await).clone();
-                                mut_cfg.failover.last_good_regular_vps = last_good.clone();
-                                if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &target_id) {
-                                    mut_cfg.failover.bs_priority_chain.remove(pos);
-                                }
-                                mut_cfg.failover.bs_priority_chain.insert(0, target_id.clone());
-                                if mut_cfg.whitelist.enabled {
-                                    mut_cfg.whitelist.target_server = Some(target_id.clone());
-                                }
-                                if let Err(e) = crate::config::save(&state.config_path, &mut_cfg).await {
-                                    crate::log_e!("[DETECTOR] Ошибка сохранения конфига: {e}");
-                                } else {
-                                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
-                                }
+                                crate::log_e!("[DETECTOR] Ошибка сохранения конфига: {e}");
                             }
 
                             format!(

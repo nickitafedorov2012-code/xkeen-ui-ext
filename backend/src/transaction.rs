@@ -510,6 +510,7 @@ impl ConfigTx {
                 }
                 return Err(format!("Ошибка записи {}: {e}", self.yaml_path.display()));
             }
+            crate::watchdog::record_own_yaml_write(&compute_content_hash(yaml));
             if !self.applied_files.contains(&self.yaml_path) {
                 self.applied_files.push(self.yaml_path.clone());
             }
@@ -676,7 +677,13 @@ impl ConfigTx {
             };
 
             let res = match snapshot {
-                Some(content) => crate::api::atomic_write_file(path, content).await,
+                Some(content) => {
+                    let wr = crate::api::atomic_write_file(path, content).await;
+                    if wr.is_ok() && path == &self.yaml_path {
+                        crate::watchdog::record_own_yaml_write(&compute_content_hash(content));
+                    }
+                    wr
+                }
                 None => match tokio::fs::remove_file(path).await {
                     Ok(_) => Ok(()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

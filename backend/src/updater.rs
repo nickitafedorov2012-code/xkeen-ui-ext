@@ -938,15 +938,12 @@ pub async fn set_channel(
     if ch != "stable" && ch != "beta" {
         return api_err("Недопустимый канал обновлений (ожидается stable или beta)");
     }
-    let cfg_snapshot = {
-        let mut cfg = state.config.write().await;
-        let mut new_cfg = (**cfg).clone();
-        new_cfg.system.update_channel = ch.clone();
-        let arc_cfg = std::sync::Arc::new(new_cfg);
-        *cfg = arc_cfg.clone();
-        arc_cfg
-    };
-    if let Err(e) = crate::config::save(&state.config_path, &cfg_snapshot).await {
+    if let Err(e) = state
+        .update_config(|cfg| {
+            cfg.system.update_channel = ch.clone();
+        })
+        .await
+    {
         return api_err(format!("Не удалось сохранить канал в конфиге: {e}"));
     }
     api_ok(json!({ "channel": ch }))
@@ -1172,15 +1169,11 @@ pub async fn install(
 
     // Синхронизируем выбранный канал в конфиге роутера, если он передан явно
     if req.channel.is_some() && (channel == "stable" || channel == "beta") && cfg_channel != channel {
-        let cfg_snapshot = {
-            let mut cfg = state.config.write().await;
-            let mut new_cfg = (**cfg).clone();
-            new_cfg.system.update_channel = channel.clone();
-            let arc_cfg = std::sync::Arc::new(new_cfg);
-            *cfg = arc_cfg.clone();
-            arc_cfg
-        };
-        let _ = crate::config::save(&state.config_path, &cfg_snapshot).await;
+        let _ = state
+            .update_config(|cfg| {
+                cfg.system.update_channel = channel.clone();
+            })
+            .await;
     }
 
     let proxy_url = {

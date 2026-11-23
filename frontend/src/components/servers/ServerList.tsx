@@ -27,7 +27,7 @@ export interface ServerListProps {
   openProvidersModal: () => void
   saveAlias: (id: string) => void
   saveAliasWithVal: (id: string, val: string) => void
-  activate: (s: ServerInfo) => void
+  activate: (s: ServerInfo) => Promise<void> | void
   runSpeedtest: (s: ServerInfo) => void
   toggleWhitelist: (id: string) => void
   makeServerNormal: (id: string) => void
@@ -71,39 +71,141 @@ export function ServerList({
   const [expandedFreeSubIds, setExpandedFreeSubIds] = useState<Record<string, boolean>>({})
   const [freeSubBusyId, setFreeSubBusyId] = useState<string | null>(null)
   const [freeSubStatus, setFreeSubStatus] = useState<FreeSubStatus | null>(null)
+  const [freeSubStatuses, setFreeSubStatuses] = useState<Partial<Record<FreeSubMode, FreeSubStatus>>>({})
 
-  useEffect(() => {
-    if (!freeSubStatus?.running) return
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await apiGet<{ status: FreeSubStatus }>('providers/free-sub/status')
-        if (res?.status) {
-          setFreeSubStatus(res.status)
-          if (!res.status.running) {
-            if (res.status.stage === 'connected') {
-              notify?.(`Подключено: ${res.status.active_node ?? 'рабочий узел'}`)
+  const hasFreeSubCards = filtered.some((s) => s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL')
+  const anyFreeSubRunning =
+    Boolean(freeSubStatus?.running) || Object.values(freeSubStatuses).some((st) => Boolean(st?.running))
+
+  const applyFreeSubPayload = (res?: {
+    status?: FreeSubStatus
+    statuses?: Partial<Record<FreeSubMode, FreeSubStatus>>
+  } | null) => {
+    if (!res) return
+    if (res.statuses) {
+      setFreeSubStatuses((prev) => {
+        for (const m of ['vpn', 'whitelist'] as FreeSubMode[]) {
+          const prevSt = prev[m]
+          const nextSt = res.statuses?.[m]
+          if (prevSt?.running && nextSt && !nextSt.running) {
+            if (nextSt.stage === 'connected') {
+              notify?.(`Подключено: ${nextSt.active_node ?? 'рабочий узел'}`)
               onFreeSubChanged?.()
-            } else if (res.status.stage === 'error' && res.status.error) {
-              notify?.(res.status.error, true)
+            } else if (nextSt.stage === 'error' && nextSt.error) {
+              notify?.(nextSt.error, true)
             }
           }
         }
+        return { ...prev, ...res.statuses }
+      })
+      if (res.status) {
+        setFreeSubStatus(res.status)
+      }
+      return
+    }
+    if (res.status) {
+      const nextSt = res.status
+      setFreeSubStatuses((prev) => ({ ...prev, [nextSt.mode]: nextSt }))
+      setFreeSubStatus((prev) => {
+        if (prev?.running && !nextSt.running && prev.mode === nextSt.mode) {
+          if (nextSt.stage === 'connected') {
+            notify?.(`Подключено: ${nextSt.active_node ?? 'рабочий узел'}`)
+            onFreeSubChanged?.()
+          } else if (nextSt.stage === 'error' && nextSt.error) {
+            notify?.(nextSt.error, true)
+          }
+        }
+        return nextSt
+      })
+    }
+  }
+
+  const refreshFreeSubStatus = async () => {
+    try {
+      const res = await apiGet<{
+        status: FreeSubStatus
+        statuses?: Partial<Record<FreeSubMode, FreeSubStatus>>
+      }>('providers/free-sub/status')
+      applyFreeSubPayload(res)
+    } catch {
+      // ignore transient poll errors
+    }
+  }
+
+  useEffect(() => {
+    if (!hasFreeSubCards) return
+    void refreshFreeSubStatus()
+  }, [hasFreeSubCards])
+
+  useEffect(() => {
+    if (!hasFreeSubCards) return
+    const intervalMs = anyFreeSubRunning ? 600 : 2500
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await apiGet<{
+          status: FreeSubStatus
+          statuses?: Partial<Record<FreeSubMode, FreeSubStatus>>
+        }>('providers/free-sub/status')
+        applyFreeSubPayload(res)
       } catch {
         // ignore transient poll errors
       }
-    }, 600)
+    }, intervalMs)
     return () => window.clearInterval(timer)
-  }, [freeSubStatus?.running, notify, onFreeSubChanged])
+  }, [hasFreeSubCards, anyFreeSubRunning, notify, onFreeSubChanged])
+
+  const startOptimisticFreeSub = (mode: FreeSubMode, label: string) => {
+    const optimistic: FreeSubStatus = {
+      running: true,
+      mode,
+      stage: 'sources',
+      stage_label: label,
+      ttff_ms: null,
+      stats: {
+        total_raw: 0,
+        rejected_invalid: 0,
+        rejected_dns: 0,
+        deduplicated: 0,
+        tcp_checked: 0,
+        tcp_passed: 0,
+        tcp_retried: 0,
+        l7_checked: 0,
+        l7_passed: 0,
+        working_count: 0,
+      },
+      active_node: null,
+      preserved_active: false,
+      source_used: null,
+      error: null,
+      updated_at: Math.floor(Date.now() / 1000),
+    }
+    setFreeSubStatus(optimistic)
+    setFreeSubStatuses((prev) => ({ ...prev, [mode]: optimistic }))
+  }
 
   const handleFreeSubConnect = async (s: ServerInfo) => {
-    activate(s)
+    const mode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+    setFreeSubBusyId(s.id)
+    startOptimisticFreeSub(mode, 'Запуск поиска рабочих узлов…')
     try {
-      const res = await apiGet<{ status: FreeSubStatus }>('providers/free-sub/status')
-      if (res?.status) {
-        setFreeSubStatus(res.status)
+      await activate(s)
+      const res = await apiGet<{
+        status: FreeSubStatus
+        statuses?: Partial<Record<FreeSubMode, FreeSubStatus>>
+      }>('providers/free-sub/status')
+      if (res?.status || res?.statuses) {
+        applyFreeSubPayload(res)
+        const targetSt = res.statuses?.[mode] ?? (res.status?.mode === mode ? res.status : undefined)
+        if (targetSt && !targetSt.running) {
+          onFreeSubChanged?.()
+        }
+      } else {
+        setFreeSubStatus(null)
       }
     } catch {
-      // ignore
+      await refreshFreeSubStatus()
+    } finally {
+      setFreeSubBusyId(null)
     }
   }
 
@@ -323,33 +425,26 @@ export function ServerList({
                       )}
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn sm btn-connect"
-                      onClick={() =>
-                        s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
-                          ? void handleFreeSubConnect(s)
-                          : activate(s)
-                      }
-                      disabled={
-                        (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
-                        Boolean(freeSubStatus?.running)
-                      }
-                      title="Сделать этот сервер активным"
-                    >
-                      <span>
-                        {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
-                        freeSubStatus?.running
-                          ? '⏳'
-                          : '🔌'}
-                      </span>
-                      <span className="btn-label-optional">
-                        {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
-                        freeSubStatus?.running
-                          ? 'Поиск…'
-                          : 'Подключить'}
-                      </span>
-                    </button>
+                    (() => {
+                      const isFreeSub = s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
+                      const mode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+                      const modeStatus = isFreeSub
+                        ? (freeSubStatuses[mode] ?? (freeSubStatus?.mode === mode ? freeSubStatus : null))
+                        : null
+                      const modeRunning = isFreeSub && Boolean(modeStatus?.running)
+                      return (
+                        <button
+                          type="button"
+                          className="btn sm btn-connect"
+                          onClick={() => (isFreeSub ? void handleFreeSubConnect(s) : activate(s))}
+                          disabled={modeRunning}
+                          title="Сделать этот сервер активным"
+                        >
+                          <span>{modeRunning ? '⏳' : '🔌'}</span>
+                          <span className="btn-label-optional">{modeRunning ? 'Поиск…' : 'Подключить'}</span>
+                        </button>
+                      )
+                    })()
                   )}
                 </div>
 
@@ -474,14 +569,60 @@ export function ServerList({
                 </div>
                 )}
               </div>
-              {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (
-                <FreeSubPoolSubmenu
-                  mode={s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'}
-                  notify={notify}
-                  onUpdated={() => onFreeSubChanged?.()}
-                  open={!!expandedFreeSubIds[s.id]}
-                />
-              )}
+              {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (() => {
+                const mode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+                const modeStatus =
+                  freeSubStatuses[mode] ?? (freeSubStatus?.mode === mode ? freeSubStatus : null)
+                const showProgress =
+                  modeStatus &&
+                  modeStatus.mode === mode &&
+                  (modeStatus.running || (modeStatus.stage === 'error' && Boolean(modeStatus.error)))
+                return (
+                  <>
+                    {showProgress && modeStatus && (
+                      <div
+                        data-testid={`free-sub-progress-${mode}`}
+                        style={{
+                          marginTop: 8,
+                          padding: '6px 10px',
+                          borderRadius: 8,
+                          fontSize: 11,
+                          background: modeStatus.stage === 'error' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(56, 189, 248, 0.1)',
+                          border: `1px solid ${modeStatus.stage === 'error' ? 'rgba(239, 68, 68, 0.35)' : 'rgba(56, 189, 248, 0.28)'}`,
+                          color: modeStatus.stage === 'error' ? '#fca5a5' : '#bae6fd',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 3,
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          {modeStatus.running ? '⏳ ' : '⚠️ '}
+                          {modeStatus.stage === 'error' && modeStatus.error
+                            ? modeStatus.error
+                            : modeStatus.stage_label || 'Поиск рабочих узлов…'}
+                        </div>
+                        {modeStatus.running && (
+                          <div style={{ fontSize: 10, opacity: 0.88 }}>
+                            {modeStatus.source_used ? `Источник: ${modeStatus.source_used} · ` : ''}
+                            TCP: {modeStatus.stats.tcp_passed}/{modeStatus.stats.tcp_checked} · L7: {modeStatus.stats.l7_passed}/{modeStatus.stats.l7_checked} · Рабочих: {modeStatus.stats.working_count}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <FreeSubPoolSubmenu
+                      mode={mode}
+                      notify={notify}
+                      onUpdated={() => onFreeSubChanged?.()}
+                      open={!!expandedFreeSubIds[s.id]}
+                      freeSubStatus={modeStatus}
+                      onJobStarted={(m) => {
+                        startOptimisticFreeSub(m, 'Фоновый подбор свежих узлов…')
+                        void refreshFreeSubStatus()
+                      }}
+                    />
+                  </>
+                )
+              })()}
             </div>
           ))}
           {filtered.length > limit && (
@@ -636,22 +777,28 @@ export function ServerList({
                       </button>
                     )}
                   </>
-                ) : (
-                  <button
-                    className="btn sm btn-connect"
-                    disabled={(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && freeSubBusyId === s.id}
-                    onClick={() => {
-                      if (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') {
-                        void handleFreeSubConnect(s)
-                      } else {
-                        activate(s)
-                      }
-                    }}
-                    style={{ padding: '3px 8px' }}
-                  >
-                    🔌
-                  </button>
-                )}
+                ) : (() => {
+                  const compactMode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+                  const compactRunning =
+                    (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
+                    Boolean((freeSubStatuses[compactMode] ?? (freeSubStatus?.mode === compactMode ? freeSubStatus : null))?.running)
+                  return (
+                    <button
+                      className="btn sm btn-connect"
+                      disabled={(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (freeSubBusyId === s.id || compactRunning)}
+                      onClick={() => {
+                        if (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') {
+                          void handleFreeSubConnect(s)
+                        } else {
+                          activate(s)
+                        }
+                      }}
+                      style={{ padding: '3px 8px' }}
+                    >
+                      {compactRunning ? '⏳' : '🔌'}
+                    </button>
+                  )
+                })()}
                 {(() => {
                   const chainIdx = failoverChain.indexOf(s.id)
                   const isStart = chainIdx === 0

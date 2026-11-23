@@ -81,6 +81,26 @@ pub fn is_service_stopped() -> bool {
     SERVICE_MANUALLY_STOPPED.load(std::sync::atomic::Ordering::Acquire)
 }
 
+static LAST_OWN_YAML_HASH: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
+
+/// Фиксирует SHA-256 хеш `config.yaml`, записанного самой панелью через `ConfigTx`,
+/// чтобы Watchdog не принимал плановые правки (например, `free_sub` или переключение режима) за внешний рестарт XKeen.
+pub fn record_own_yaml_write(content_hash: &str) {
+    if let Ok(mut guard) = LAST_OWN_YAML_HASH.write() {
+        *guard = Some(content_hash.to_string());
+    }
+}
+
+pub fn is_own_yaml_write(content: &str) -> bool {
+    let cur = crate::transaction::compute_content_hash(content);
+    LAST_OWN_YAML_HASH
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .is_some_and(|saved| saved == cur)
+}
+
 /// Фоновый сторожевой процесс (watchdog) для защиты конфигурации config.yaml.
 /// Если служба XKeen перезапускается (S05xkeen restart или автообновление по расписанию),
 /// XKeen перегенерирует config.yaml, затирая блоки AUTO-DEVICE и AUTO-FORCE.
@@ -164,11 +184,17 @@ pub fn spawn(state: AppState) {
             };
 
             if file_changed {
+                let Ok(_routing_guard) = state.routing_lock.try_lock() else {
+                    continue;
+                };
                 last_mtime = mtime;
                 last_len = len;
 
                 // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
+                    if is_own_yaml_write(&content) {
+                        continue;
+                    }
                     // BUG-16: Проверка эффективной необходимости вставок
                     let has_active_device_assignments = device_routing.values().any(|dr| {
                         dr.servers.first().is_some_and(|s| !s.trim().is_empty() && s.trim() != "default")
@@ -972,7 +998,10 @@ pub fn spawn_zapret_monitor(state: AppState) {
             }
 
             let init_script = "/opt/etc/init.d/S51zapret";
-            if !Path::new(init_script).exists() {
+            if !Path::new(init_script).exists()
+                || (!crate::api::is_nfqws1_available() && !crate::api::is_nfqws2_available())
+            {
+                restart_failures = 0;
                 continue;
             }
 

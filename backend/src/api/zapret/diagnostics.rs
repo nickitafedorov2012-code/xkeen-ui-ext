@@ -221,22 +221,28 @@ pub async fn zapret_action(
                 let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
                 let _ = tokio::fs::write("/opt/zapret2/version.txt", format!("{target_ver}\n")).await;
 
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut cfg = (**state.config.read().await).clone();
-                cfg.zapret.engine = "v2".to_string();
-                cfg.zapret.update_available = false;
-                cfg.zapret.latest_version = Some(target_ver.clone());
-                cfg.zapret.last_update_check = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
-                if let Some(ref ca) = cfg.zapret.custom_args {
+                let mut next_zapret = state.cfg_snapshot().await.zapret.clone();
+                next_zapret.engine = "v2".to_string();
+                next_zapret.update_available = false;
+                next_zapret.latest_version = Some(target_ver.clone());
+                next_zapret.last_update_check = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                if let Some(ref ca) = next_zapret.custom_args {
                     if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
-                        cfg.zapret.custom_args = None;
+                        next_zapret.custom_args = None;
                     }
                 }
-                if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+                if let Err(e) = sync_zapret_files(&next_zapret).await {
                     return api_err(format!("Ошибка синхронизации файлов Zapret 2.0: {e}"));
                 }
-                let _ = config::save(&state.config_path, &cfg).await;
-                *state.config.write().await = std::sync::Arc::new(cfg.clone());
+                let cfg = match state
+                    .update_config(|cfg| {
+                        cfg.zapret = next_zapret;
+                    })
+                    .await
+                {
+                    Ok((cfg, _)) => cfg,
+                    Err(e) => return api_err(format!("Ошибка сохранения конфига Zapret 2.0: {e}")),
+                };
 
                 if cfg.zapret.enabled {
                     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
@@ -344,30 +350,36 @@ pub async fn zapret_action(
             .await;
         }
 
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.engine = target_engine.to_string();
+        let mut next_zapret = state.cfg_snapshot().await.zapret.clone();
+        next_zapret.engine = target_engine.to_string();
         if target_engine == "v1" {
-            cfg.zapret.update_available = false;
+            next_zapret.update_available = false;
         }
 
         if target_engine == "v1" {
-            if let Some(ref ca) = cfg.zapret.custom_args {
+            if let Some(ref ca) = next_zapret.custom_args {
                 if ca.contains("--lua-desync") || ca.contains("multisplit") {
-                    cfg.zapret.custom_args = Some(convert_lua_to_legacy_desync(ca));
+                    next_zapret.custom_args = Some(convert_lua_to_legacy_desync(ca));
                 }
             }
-        } else if let Some(ref ca) = cfg.zapret.custom_args {
+        } else if let Some(ref ca) = next_zapret.custom_args {
             if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
-                cfg.zapret.custom_args = None;
+                next_zapret.custom_args = None;
             }
         }
 
-        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+        if let Err(e) = sync_zapret_files(&next_zapret).await {
             return api_err(format!("Ошибка синхронизации файлов Zapret при смене движка: {e}"));
         }
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        let cfg = match state
+            .update_config(|cfg| {
+                cfg.zapret = next_zapret;
+            })
+            .await
+        {
+            Ok((cfg, _)) => cfg,
+            Err(e) => return api_err(format!("Ошибка сохранения конфига при смене движка: {e}")),
+        };
 
         if cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
@@ -392,9 +404,8 @@ pub async fn zapret_action(
 
     // 0.1 Применение выбранной стратегии автоподбора
     if act == "apply_strategy" {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        let prev_zapret = cfg.zapret.clone();
+        let prev_zapret = state.cfg_snapshot().await.zapret.clone();
+        let mut next_zapret = prev_zapret.clone();
         let custom_args = body.custom_args.as_ref().filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
         let final_args = match custom_args {
             Some(a) => Some(a),
@@ -404,36 +415,47 @@ pub async fn zapret_action(
             if let Err(e) = validate_custom_args(args) {
                 return api_err(e);
             }
-            let effective_args = if !should_use_nfqws2(&cfg.zapret) && (args.contains("--lua-desync") || args.contains("multisplit")) {
+            let effective_args = if !should_use_nfqws2(&next_zapret) && (args.contains("--lua-desync") || args.contains("multisplit")) {
                 convert_lua_to_legacy_desync(args)
             } else {
                 args.clone()
             };
-            cfg.zapret.custom_args = Some(effective_args);
+            next_zapret.custom_args = Some(effective_args);
         }
-        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+        if let Err(e) = sync_zapret_files(&next_zapret).await {
             return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        let cfg = match state
+            .update_config(|cfg| {
+                cfg.zapret.custom_args = next_zapret.custom_args.clone();
+            })
+            .await
+        {
+            Ok((cfg, _)) => cfg,
+            Err(e) => return api_err(format!("Ошибка сохранения стратегии Zapret: {e}")),
+        };
         if cfg.zapret.enabled {
             match tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await {
                 Ok(out) if !out.status.success() => {
                     let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-                    cfg.zapret = prev_zapret;
-                    let _ = sync_zapret_files(&cfg.zapret).await;
-                    let _ = config::save(&state.config_path, &cfg).await;
-                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    let _ = sync_zapret_files(&prev_zapret).await;
+                    let _ = state
+                        .update_config(|c| {
+                            c.zapret = prev_zapret;
+                        })
+                        .await;
                     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
                     return api_err(format!("Ошибка применения стратегии Zapret:\n{}", err_msg.trim()));
                 }
                 Err(e) => {
                     // Z-10: rollback симметричен ветке Ok(!success) — конфиг уже был
                     // сохранён с новой стратегией, откатываем файлы и состояние
-                    cfg.zapret = prev_zapret;
-                    let _ = sync_zapret_files(&cfg.zapret).await;
-                    let _ = config::save(&state.config_path, &cfg).await;
-                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    let _ = sync_zapret_files(&prev_zapret).await;
+                    let _ = state
+                        .update_config(|c| {
+                            c.zapret = prev_zapret;
+                        })
+                        .await;
                     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
                     return api_err(format!("Ошибка перезапуска S51zapret: {e} (конфигурация откачена)"));
                 }
@@ -452,11 +474,14 @@ pub async fn zapret_action(
     if act == "reset_analytics" {
         let _ = tokio::process::Command::new("sh").arg("-c").arg(format!("{} -t mangle -Z zapret 2>/dev/null || true", crate::system::iptables_cmd_str())).output().await;
         ZAPRET_LAST_IPT_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.period_saved_bytes = 0;
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg);
+        ZAPRET_PERIOD_SAVED_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+        ZAPRET_LAST_FLUSHED_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+        ZAPRET_PERIOD_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+        let _ = state
+            .update_config(|cfg| {
+                cfg.zapret.period_saved_bytes = 0;
+            })
+            .await;
         return api_ok(json!({ "success": true, "message": "Счётчики перехваченного трафика DPI сброшены" }));
     }
 
@@ -781,7 +806,7 @@ pub async fn zapret_action(
                     tx.config_mut().zapret.update_available = false;
                     let _ = tx.commit_without_reload().await;
                 }
-                let _cfg = state.config.read().await;
+                let _cfg = state.cfg_snapshot().await;
                 let _ = sync_zapret_files(&_cfg.zapret).await;
                 if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {
                     if !out.status.success() {
@@ -1161,6 +1186,66 @@ pub async fn zapret_action(
 // ==================== ZAPRET DPI АНАЛИТИКА И АВТОПОДБОР =============
 
 static ZAPRET_LAST_IPT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ZAPRET_PERIOD_SAVED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ZAPRET_LAST_FLUSHED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ZAPRET_PERIOD_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const ZAPRET_ANALYTICS_FLUSH_DELTA_BYTES: u64 = 5 * 1024 * 1024;
+
+#[cfg(test)]
+pub(crate) fn reset_zapret_analytics_counters_for_test() {
+    use std::sync::atomic::Ordering;
+    ZAPRET_LAST_IPT_BYTES.store(0, Ordering::Relaxed);
+    ZAPRET_PERIOD_SAVED_BYTES.store(0, Ordering::Relaxed);
+    ZAPRET_LAST_FLUSHED_BYTES.store(0, Ordering::Relaxed);
+    ZAPRET_PERIOD_INITIALIZED.store(false, Ordering::Release);
+}
+
+/// Атомарно учитывает спасённый трафик Zapret без захвата `config.write()` на каждый GET-опрос;
+/// на диск сбрасывает только при накоплении дельты >= 5 МБ через `try_update_config_nonblocking`.
+pub(crate) async fn record_zapret_saved_bytes(state: &AppState, total_bytes: u64) -> u64 {
+    use std::sync::atomic::Ordering;
+
+    if !ZAPRET_PERIOD_INITIALIZED.swap(true, Ordering::AcqRel) {
+        let init_saved = state.cfg_snapshot().await.zapret.period_saved_bytes;
+        let _ = ZAPRET_PERIOD_SAVED_BYTES.try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            Some(cur.max(init_saved))
+        });
+        ZAPRET_LAST_FLUSHED_BYTES.store(init_saved, Ordering::Relaxed);
+    }
+
+    let prev_ipt = ZAPRET_LAST_IPT_BYTES.swap(total_bytes, Ordering::Relaxed);
+    let delta_bytes = if total_bytes >= prev_ipt {
+        total_bytes - prev_ipt
+    } else {
+        total_bytes
+    };
+
+    let period_bytes = if delta_bytes > 0 {
+        ZAPRET_PERIOD_SAVED_BYTES
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_add(delta_bytes).max(total_bytes))
+            })
+            .map(|prev| prev.saturating_add(delta_bytes).max(total_bytes))
+            .unwrap_or(total_bytes)
+    } else {
+        ZAPRET_PERIOD_SAVED_BYTES.load(Ordering::Acquire).max(total_bytes)
+    };
+
+    let last_flushed = ZAPRET_LAST_FLUSHED_BYTES.load(Ordering::Relaxed);
+    if period_bytes.saturating_sub(last_flushed) >= ZAPRET_ANALYTICS_FLUSH_DELTA_BYTES {
+        if let Some(Ok(_)) = state
+            .try_update_config_nonblocking(|cfg| {
+                cfg.zapret.period_saved_bytes = cfg.zapret.period_saved_bytes.max(period_bytes);
+            })
+            .await
+        {
+            ZAPRET_LAST_FLUSHED_BYTES.store(period_bytes, Ordering::Relaxed);
+        }
+    }
+
+    period_bytes
+}
 
 /// GET /api/zapret/analytics — Live-монитор и счётчик спасённого трафика (DPI Analytics)
 pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
@@ -1192,29 +1277,7 @@ pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
     }
 
     // Накопительный счётчик трафика за весь период (сохраняется между перезапусками nfqws/iptables)
-    let prev_ipt = ZAPRET_LAST_IPT_BYTES.swap(total_bytes, std::sync::atomic::Ordering::Relaxed);
-    let delta_bytes = if total_bytes >= prev_ipt {
-        total_bytes - prev_ipt
-    } else {
-        total_bytes
-    };
-
-    let period_bytes = if delta_bytes > 0 {
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.period_saved_bytes = cfg.zapret.period_saved_bytes.saturating_add(delta_bytes).max(total_bytes);
-        let p = cfg.zapret.period_saved_bytes;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-        // Периодически сохраняем на диск при накоплении >= 5 МБ под защитой мьютекса (BUG-12)
-        if delta_bytes >= 5 * 1024 * 1024 {
-            if let Ok(_guard) = state.config_lock.try_lock() {
-                let _ = config::save(&state.config_path, &cfg).await;
-            }
-        }
-        p
-    } else {
-        let cfg = state.config.read().await;
-        cfg.zapret.period_saved_bytes.max(total_bytes)
-    };
+    let period_bytes = record_zapret_saved_bytes(&state, total_bytes).await;
 
     // Process memory & uptime stats
     let mut nfqws_cpu_pct: f32 = 0.0;
@@ -1552,19 +1615,17 @@ pub async fn do_sync_community_hostlist(
     let _ = tokio::fs::write(community_file_path, valid_domains.join("\n")).await;
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    {
-        let _guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.community_hostlist_last_updated = Some(now.clone());
-        cfg.zapret.community_hostlist_count = count;
-        cfg.zapret.community_hostlist_enabled = true;
-        cfg.zapret.community_hostlist_url = target_url.clone();
-        cfg.zapret.community_hostlist_auto_update = auto_update;
-        let _ = crate::config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-
-        let _ = sync_zapret_files(&cfg.zapret).await;
-    }
+    let cfg = state
+        .update_config(|cfg| {
+            cfg.zapret.community_hostlist_last_updated = Some(now.clone());
+            cfg.zapret.community_hostlist_count = count;
+            cfg.zapret.community_hostlist_enabled = true;
+            cfg.zapret.community_hostlist_url = target_url.clone();
+            cfg.zapret.community_hostlist_auto_update = auto_update;
+        })
+        .await?
+        .0;
+    let _ = sync_zapret_files(&cfg.zapret).await;
 
     // Fast SIGHUP hostlist reload
     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
@@ -1627,34 +1688,38 @@ pub async fn toggle_device_zapret(
         return api_err("Некорректный MAC-адрес устройства");
     }
 
-    let _guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
+    let cfg = match state
+        .try_update_config(|cfg| {
+            if body.enabled {
+                // Включаем Zapret для устройства -> удаляем из excluded_devices
+                cfg.zapret.excluded_devices.retain(|d| {
+                    let d_clean = d.trim();
+                    !d_clean.eq_ignore_ascii_case(&target_ip) && !d_clean.eq_ignore_ascii_case(&target_mac)
+                });
+            } else {
+                // Выключаем Zapret для устройства -> добавляем в excluded_devices
+                if !target_ip.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_ip)) {
+                    cfg.zapret.excluded_devices.push(target_ip.clone());
+                }
+                if !target_mac.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_mac)) {
+                    cfg.zapret.excluded_devices.push(target_mac.clone());
+                }
+            }
 
-    if body.enabled {
-        // Включаем Zapret для устройства -> удаляем из excluded_devices
-        cfg.zapret.excluded_devices.retain(|d| {
-            let d_clean = d.trim();
-            !d_clean.eq_ignore_ascii_case(&target_ip) && !d_clean.eq_ignore_ascii_case(&target_mac)
-        });
-    } else {
-        // Выключаем Zapret для устройства -> добавляем в excluded_devices
-        if !target_ip.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_ip)) {
-            cfg.zapret.excluded_devices.push(target_ip.clone());
+            let conflicts = crate::config::device_conflicts(cfg);
+            if !conflicts.is_empty() {
+                return Err(format!("CONFLICT:{}", crate::config::format_device_conflicts(&conflicts)));
+            }
+            Ok(())
+        })
+        .await
+    {
+        Ok((cfg, _)) => cfg,
+        Err(e) if e.starts_with("CONFLICT:") => {
+            return api_err_bad_request(e.trim_start_matches("CONFLICT:"));
         }
-        if !target_mac.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_mac)) {
-            cfg.zapret.excluded_devices.push(target_mac.clone());
-        }
-    }
-
-    let conflicts = crate::config::device_conflicts(&cfg);
-    if !conflicts.is_empty() {
-        return api_err_bad_request(crate::config::format_device_conflicts(&conflicts));
-    }
-
-    if let Err(e) = crate::config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения конфигурации: {e}"));
-    }
-    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        Err(e) => return api_err(format!("Ошибка сохранения конфигурации: {e}")),
+    };
 
     let _ = sync_zapret_files(&cfg.zapret).await;
 
@@ -1694,4 +1759,86 @@ pub fn build_zapret2_download_urls(target_version: &str) -> Vec<String> {
         format!("https://github.com/bol-van/zapret2/releases/download/{tag}/zapret2-{no_v}.tar.gz"),
         format!("https://github.com/bol-van/zapret2/archive/refs/tags/{tag}.tar.gz"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn regression_zapret_analytics_concurrent_config_update_preserves_both() {
+        reset_zapret_analytics_counters_for_test();
+        let dir = std::env::temp_dir().join(format!("xkeen_zapret_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.zapret.period_saved_bytes = 1024;
+        config::save(&cfg_path, &cfg).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let s1 = state.clone();
+        let t_cfg = tokio::spawn(async move {
+            for i in 0..5 {
+                let mut tx = crate::transaction::ConfigTx::begin(&s1).await.unwrap();
+                tx.config_mut().failover.enabled = true;
+                tx.config_mut()
+                    .server_aliases
+                    .insert(format!("srv-{i}"), format!("Alias {i}"));
+                tx.commit_without_reload().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let s2 = state.clone();
+        let t_zap = tokio::spawn(async move {
+            for step in 1..=6u64 {
+                let _ = record_zapret_saved_bytes(&s2, step * 1_100_000).await;
+                tokio::task::yield_now().await;
+            }
+            let _ = get_zapret_analytics(State(s2)).await;
+        });
+
+        let (r1, r2) = tokio::join!(t_cfg, t_zap);
+        r1.unwrap();
+        r2.unwrap();
+
+        // Следующий тик опроса после освобождения config_lock сбрасывает накопленную дельту на диск
+        let flushed = record_zapret_saved_bytes(&state, 6 * 1_100_000).await;
+        assert!(flushed >= 6 * 1_100_000);
+
+        let mem = state.cfg_snapshot().await;
+        let on_disk = config::load(&cfg_path);
+        for (label, c) in [("memory", mem.as_ref()), ("disk", &on_disk)] {
+            assert!(c.failover.enabled, "{label}: failover.enabled не должен затираться");
+            assert_eq!(c.server_aliases.len(), 5, "{label}: server_aliases не должны теряться");
+            assert!(
+                c.zapret.period_saved_bytes >= 6 * 1_100_000,
+                "{label}: period_saved_bytes={} < 6.6MB",
+                c.zapret.period_saved_bytes
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        reset_zapret_analytics_counters_for_test();
+    }
 }

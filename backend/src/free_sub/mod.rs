@@ -39,7 +39,8 @@ pub const FREE_VPN_PROVIDER_ID: &str = "free_vpn";
 pub const FREE_WL_PROVIDER_ID: &str = "free_wl";
 
 pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
-pub const MAX_PARSED_NODES: usize = 600;
+pub const MAX_PARSED_NODES: usize = 1200;
+pub const MAX_PARSED_NODES_PER_SOURCE: usize = 450;
 pub const HTTP_FETCH_TIMEOUT_SECS: u64 = 10;
 pub const DNS_RESOLVE_TIMEOUT_MS: u64 = 2500;
 pub const SOFT_SUBNET_QUOTA: usize = 2;
@@ -47,13 +48,18 @@ pub const TCP_MAX_CONCURRENT: usize = 16;
 pub const TCP_RATE_INTERVAL_MS: u64 = 25;
 pub const TCP_FAST_TIMEOUT_MS: u64 = 700;
 pub const TCP_SLOW_TIMEOUT_MS: u64 = 1800;
-pub const TCP_PHASE_BUDGET_SECS: u64 = 12;
-pub const L7_MAX_CONCURRENT: usize = 4;
+pub const TCP_PHASE_BUDGET_SECS: u64 = 6;
+pub const L7_MAX_CONCURRENT: usize = 8;
 pub const L7_BATCH_SIZE: usize = 8;
-pub const L7_TIMEOUT_MS: u64 = 4500;
+pub const L7_TIMEOUT_MS: u64 = 3500;
+pub const L7_FAST_ACCEPT_SCORE_MS: i64 = 1200;
+pub const L7_PENALIZED_GRACE_MS: u64 = 650;
+pub const FOREGROUND_L7_MAX_CANDIDATES: usize = 32;
+pub const FOREGROUND_L7_BUDGET_SECS: u64 = 20;
 pub const BACKGROUND_BACKUP_TARGET: usize = 20;
 pub const BACKGROUND_REFILL_BUDGET_SECS: u64 = 180;
 pub const BLACKLIST_TTL_SECS: i64 = 86_400;
+pub const WATCHDOG_BLACKLIST_TTL_SECS: i64 = 600;
 pub const MAX_PER_ENDPOINT_IN_POOL: usize = 2;
 pub const REAL_TRAFFIC_PRIORITY_BYTES: u64 = 1_048_576;
 pub const MAX_SESSION_HISTORY: usize = 20;
@@ -139,11 +145,23 @@ pub struct CachedWorkingNode {
     pub proxy: Value,
     pub last_ok_ts: i64,
     pub last_delay_ms: i64,
+    #[serde(default)]
+    pub quality_score: i64,
     pub mode: FreeSubMode,
     #[serde(default)]
     pub high_priority: bool,
     #[serde(default)]
     pub total_bytes: u64,
+}
+
+impl CachedWorkingNode {
+    pub fn effective_quality_score(&self) -> i64 {
+        if self.quality_score > 0 {
+            self.quality_score
+        } else {
+            self.last_delay_ms
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,18 +218,68 @@ impl FreeSubCache {
     }
 }
 
-static FREE_SUB_STATUS: std::sync::LazyLock<RwLock<FreeSubStatus>> =
+static FREE_VPN_STATUS: std::sync::LazyLock<RwLock<FreeSubStatus>> =
     std::sync::LazyLock::new(|| RwLock::new(FreeSubStatus::default()));
-static FREE_SUB_RUN_LOCK: std::sync::LazyLock<Mutex<()>> =
-    std::sync::LazyLock::new(|| Mutex::new(()));
+static FREE_WL_STATUS: std::sync::LazyLock<RwLock<FreeSubStatus>> =
+    std::sync::LazyLock::new(|| RwLock::new(FreeSubStatus { mode: FreeSubMode::Whitelist, ..Default::default() }));
+static FREE_VPN_RUN_LOCK: std::sync::LazyLock<Arc<Mutex<()>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(())));
+static FREE_WL_RUN_LOCK: std::sync::LazyLock<Arc<Mutex<()>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(())));
 
-pub async fn get_status() -> FreeSubStatus {
-    FREE_SUB_STATUS.read().await.clone()
+fn status_lock(mode: FreeSubMode) -> &'static RwLock<FreeSubStatus> {
+    match mode {
+        FreeSubMode::Vpn => &FREE_VPN_STATUS,
+        FreeSubMode::Whitelist => &FREE_WL_STATUS,
+    }
 }
 
-async fn update_status(f: impl FnOnce(&mut FreeSubStatus)) {
-    let mut guard = FREE_SUB_STATUS.write().await;
+fn run_lock(mode: FreeSubMode) -> &'static Arc<Mutex<()>> {
+    match mode {
+        FreeSubMode::Vpn => &FREE_VPN_RUN_LOCK,
+        FreeSubMode::Whitelist => &FREE_WL_RUN_LOCK,
+    }
+}
+
+pub async fn get_status_for(mode: FreeSubMode) -> FreeSubStatus {
+    status_lock(mode).read().await.clone()
+}
+
+pub async fn get_all_statuses() -> (FreeSubStatus, FreeSubStatus) {
+    let vpn = FREE_VPN_STATUS.read().await.clone();
+    let wl = FREE_WL_STATUS.read().await.clone();
+    (vpn, wl)
+}
+
+pub fn pick_primary_status(vpn: &FreeSubStatus, wl: &FreeSubStatus) -> FreeSubStatus {
+    if wl.running && !vpn.running {
+        return wl.clone();
+    }
+    if vpn.running && !wl.running {
+        return vpn.clone();
+    }
+    let wl_ts = wl.updated_at.unwrap_or(0);
+    let vpn_ts = vpn.updated_at.unwrap_or(0);
+    if wl_ts > vpn_ts {
+        wl.clone()
+    } else if vpn_ts > wl_ts {
+        vpn.clone()
+    } else if wl.stage != FreeSubStage::Idle {
+        wl.clone()
+    } else {
+        vpn.clone()
+    }
+}
+
+pub async fn get_status() -> FreeSubStatus {
+    let (vpn, wl) = get_all_statuses().await;
+    pick_primary_status(&vpn, &wl)
+}
+
+async fn update_status(mode: FreeSubMode, f: impl FnOnce(&mut FreeSubStatus)) {
+    let mut guard = status_lock(mode).write().await;
     f(&mut guard);
+    guard.mode = mode;
 }
 
 /// Компактные курируемые источники (с CDN-зеркалами jsDelivr и прямыми raw-ссылками).
@@ -783,6 +851,25 @@ async fn run_tcp_prefilter_endpoints(
     rate_interval_ms: u64,
     budget: Duration,
 ) -> HashMap<SocketAddr, TcpOutcome> {
+    run_tcp_prefilter_endpoints_budgeted(
+        endpoints,
+        timeout_ms,
+        max_concurrent,
+        rate_interval_ms,
+        budget,
+        None,
+    )
+    .await
+}
+
+async fn run_tcp_prefilter_endpoints_budgeted(
+    endpoints: Vec<SocketAddr>,
+    timeout_ms: u64,
+    max_concurrent: usize,
+    rate_interval_ms: u64,
+    budget: Duration,
+    early_stop_ok: Option<usize>,
+) -> HashMap<SocketAddr, TcpOutcome> {
     let mut unique_eps = Vec::new();
     let mut seen = HashSet::new();
     for ep in endpoints {
@@ -793,27 +880,41 @@ async fn run_tcp_prefilter_endpoints(
 
     let sem = Arc::new(Semaphore::new(max_concurrent));
     let started = Instant::now();
-    let mut handles = Vec::with_capacity(unique_eps.len());
+    let mut futs = futures_util::stream::FuturesUnordered::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(rate_interval_ms));
+    let mut outcomes = HashMap::new();
+    let mut ok_count = 0usize;
 
     for ep in unique_eps {
         if started.elapsed() >= budget {
             break;
         }
+        if let Some(target_ok) = early_stop_ok {
+            if ok_count >= target_ok && started.elapsed() >= Duration::from_millis(1200) {
+                break;
+            }
+        }
         ticker.tick().await;
+        while let Some(joined) = futures_util::FutureExt::now_or_never(futs.next()).flatten() {
+            if let Ok((done_ep, res)) = joined {
+                if res == TcpOutcome::Ok {
+                    ok_count += 1;
+                }
+                outcomes.insert(done_ep, res);
+            }
+        }
         let Ok(permit) = sem.clone().acquire_owned().await else {
             break;
         };
-        handles.push(tokio::spawn(async move {
+        futs.push(tokio::spawn(async move {
             let _p = permit;
             let res = tcp_probe_endpoint(ep, timeout_ms).await;
             (ep, res)
         }));
     }
 
-    let mut outcomes = HashMap::new();
-    for h in handles {
-        if let Ok((ep, res)) = h.await {
+    while let Some(joined) = futs.next().await {
+        if let Ok((ep, res)) = joined {
             outcomes.insert(ep, res);
         }
     }
@@ -940,13 +1041,92 @@ pub fn should_upgrade_active_node(
     much_faster || tcp_over_quic
 }
 
+/// Универсальное ядро параллельной L7-проверки партии с поддержкой мгновенного выхода
+/// при качественном узле (`quality_score < L7_FAST_ACCEPT_SCORE_MS`) и короткого grace-окна (650 мс)
+/// при получении штрафного скора (`>= 1200`), чтобы не отдать победу сломанному/зашейпленному узлу.
+pub async fn probe_l7_batch_metrics_with<F, Fut>(
+    nodes: Vec<Value>,
+    max_concurrent: usize,
+    stop_after_first: bool,
+    probe_fn: F,
+) -> Vec<(Value, mihomo::L7ProbeMetrics)>
+where
+    F: Fn(Value) -> Fut,
+    Fut: std::future::Future<Output = (Value, Result<mihomo::L7ProbeMetrics, String>)>,
+{
+    let mut verified = Vec::new();
+    let mut futs = stream::iter(nodes.into_iter().map(probe_fn)).buffer_unordered(max_concurrent);
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
+
+    loop {
+        let next_opt = if let Some(dl) = grace_deadline {
+            match tokio::time::timeout_at(dl, futs.next()).await {
+                Ok(v) => v,
+                Err(_) => break,
+            }
+        } else {
+            futs.next().await
+        };
+        let Some((node, res)) = next_opt else {
+            break;
+        };
+        if let Ok(metrics) = res {
+            verified.push((node, metrics));
+            if stop_after_first {
+                if metrics.quality_score < L7_FAST_ACCEPT_SCORE_MS {
+                    break;
+                }
+                if grace_deadline.is_none() {
+                    grace_deadline = Some(
+                        tokio::time::Instant::now() + Duration::from_millis(L7_PENALIZED_GRACE_MS),
+                    );
+                }
+            }
+        }
+    }
+    verified.sort_by_key(|(_, m)| m.quality_score);
+    verified
+}
+
+/// Обратно-совместимая обёртка над `probe_l7_batch_metrics_with`, возвращающая `quality_score`.
+pub async fn probe_l7_batch_with<F, Fut>(
+    nodes: Vec<Value>,
+    max_concurrent: usize,
+    stop_after_first: bool,
+    probe_fn: F,
+) -> Vec<(Value, i64)>
+where
+    F: Fn(Value) -> Fut,
+    Fut: std::future::Future<Output = (Value, Result<i64, String>)>,
+{
+    probe_l7_batch_metrics_with(nodes, max_concurrent, stop_after_first, |node| {
+        let fut = probe_fn(node);
+        async move {
+            let (n, res) = fut.await;
+            (
+                n,
+                res.map(|score| mihomo::L7ProbeMetrics {
+                    rtt_ms: score,
+                    quality_score: score,
+                }),
+            )
+        }
+    })
+    .await
+    .into_iter()
+    .map(|(n, m)| (n, m.quality_score))
+    .collect()
+}
+
 /// Фаза 2: точечная L7-валидация партии кандидатов через отдельный служебный провайдер `__free_sub_probe`.
-/// Проверяет всю мини-партию целиком и сортирует успешные узлы по возрастанию задержки.
+/// При `stop_after_first == true` немедленно возвращает первый качественный узел (или лучший за grace-окно 650 мс)
+/// для минимального TTFF, а остальные кандидаты добираются в фоне.
 async fn run_l7_batch_probe(
     state: &AppState,
+    mode: FreeSubMode,
     batch: &[Value],
-    _stop_after_first: bool,
-) -> Vec<(Value, i64)> {
+    stop_after_first: bool,
+) -> Vec<(Value, mihomo::L7ProbeMetrics)> {
     if batch.is_empty() {
         return Vec::new();
     }
@@ -973,8 +1153,7 @@ async fn run_l7_batch_probe(
         return Vec::new();
     }
 
-    let mut verified = Vec::new();
-    let mut futs = stream::iter(prepared.into_iter().map(|node| {
+    let verified = probe_l7_batch_metrics_with(prepared, L7_MAX_CONCURRENT, stop_after_first, |node| {
         let http = state.http.clone();
         let cfg_c = cfg.clone();
         async move {
@@ -983,7 +1162,7 @@ async fn run_l7_batch_probe(
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let res = mihomo::probe_service_provider_node_l7_scored(
+            let res = mihomo::probe_service_provider_node_l7_metrics(
                 &http,
                 &cfg_c,
                 FREE_SUB_PROBE_PROVIDER_ID,
@@ -991,24 +1170,23 @@ async fn run_l7_batch_probe(
                 L7_TIMEOUT_MS,
             )
             .await;
+            update_status(mode, |st| {
+                st.stats.l7_checked += 1;
+                if res.is_ok() {
+                    st.stats.l7_passed += 1;
+                }
+            })
+            .await;
             (node, res)
         }
-    }))
-    .buffer_unordered(L7_MAX_CONCURRENT);
+    })
+    .await;
 
-    while let Some((node, res)) = futs.next().await {
-        update_status(|st| st.stats.l7_checked += 1).await;
-        if let Ok(delay) = res {
-            update_status(|st| st.stats.l7_passed += 1).await;
-            verified.push((node, delay));
-        }
-    }
-    sort_l7_verified_by_delay(&mut verified);
     if !verified.is_empty() {
         let mut cache_map = std::collections::BTreeMap::new();
-        for (node, delay) in &verified {
+        for (node, metrics) in &verified {
             if let Some(nm) = node.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                cache_map.insert(nm.to_string(), *delay);
+                cache_map.insert(nm.to_string(), metrics.rtt_ms);
             }
         }
         if !cache_map.is_empty() {
@@ -1018,12 +1196,14 @@ async fn run_l7_batch_probe(
     verified
 }
 
-/// Сохраняет активный узел пользователя с прежним именем и параметрами, если он принадлежит целевой подписке.
-/// Не допускает более одного узла с одинаковым `(server, port)` в основном пуле.
-pub fn merge_verified_with_active_session(
+/// Сохраняет активный узел пользователя с прежним именем и параметрами, если он принадлежит целевой подписке
+/// и НЕ находится в чёрном списке. Не допускает более одного узла с одинаковым `(server, port)` в пуле.
+pub fn merge_verified_with_active_session_checked(
     verified: Vec<Value>,
     existing_nodes: &[Value],
     active_leaf: Option<&str>,
+    mc: &ModeCache,
+    now_ts: i64,
 ) -> (Vec<Value>, bool) {
     let mut out = Vec::new();
     let mut seen_keys = HashSet::new();
@@ -1035,16 +1215,22 @@ pub fn merge_verified_with_active_session(
             .iter()
             .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(active_name))
         {
-            seen_keys.insert(node_dedup_key(active_node));
-            if let Some(ep) = endpoint_blacklist_key(active_node) {
-                seen_endpoints.insert(ep);
+            if !is_node_blacklisted(mc, active_node, active_name, now_ts) {
+                seen_keys.insert(node_dedup_key(active_node));
+                if let Some(ep) = endpoint_blacklist_key(active_node) {
+                    seen_endpoints.insert(ep);
+                }
+                out.push(active_node.clone());
+                preserved = true;
             }
-            out.push(active_node.clone());
-            preserved = true;
         }
     }
 
     for node in verified {
+        let nm = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if is_node_blacklisted(mc, &node, nm, now_ts) {
+            continue;
+        }
         let key = node_dedup_key(&node);
         let ep_ok = endpoint_blacklist_key(&node)
             .map(|ep| seen_endpoints.insert(ep))
@@ -1055,6 +1241,17 @@ pub fn merge_verified_with_active_session(
     }
     ensure_unique_node_names(&mut out);
     (out, preserved)
+}
+
+/// Сохраняет активный узел пользователя с прежним именем и параметрами, если он принадлежит целевой подписке.
+/// Не допускает более одного узла с одинаковым `(server, port)` в основном пуле.
+pub fn merge_verified_with_active_session(
+    verified: Vec<Value>,
+    existing_nodes: &[Value],
+    active_leaf: Option<&str>,
+) -> (Vec<Value>, bool) {
+    let empty_mc = ModeCache::default();
+    merge_verified_with_active_session_checked(verified, existing_nodes, active_leaf, &empty_mc, 0)
 }
 
 fn unquote_yaml_scalar(raw: &str) -> Value {
@@ -1251,7 +1448,17 @@ pub fn blacklist_node_in_cache(
     node_name: &str,
     now_ts: i64,
 ) {
-    let expires = now_ts + BLACKLIST_TTL_SECS;
+    blacklist_node_in_cache_ttl(mc, proxy_opt, node_name, now_ts, BLACKLIST_TTL_SECS);
+}
+
+pub fn blacklist_node_in_cache_ttl(
+    mc: &mut ModeCache,
+    proxy_opt: Option<&Value>,
+    node_name: &str,
+    now_ts: i64,
+    ttl_secs: i64,
+) {
+    let expires = now_ts + ttl_secs;
     if !node_name.trim().is_empty() {
         mc.blacklist.insert(node_name.trim().to_string(), expires);
     }
@@ -1261,6 +1468,46 @@ pub fn blacklist_node_in_cache(
             mc.blacklist.insert(ep_key, expires);
         }
     }
+}
+
+pub fn unblacklist_node_in_cache(mc: &mut ModeCache, proxy_opt: Option<&Value>, node_name: &str) {
+    let trimmed = node_name.trim();
+    if !trimmed.is_empty() {
+        mc.blacklist.remove(trimmed);
+    }
+    if let Some(p) = proxy_opt {
+        mc.blacklist.remove(&node_dedup_key(p));
+        if let Some(ep_key) = endpoint_blacklist_key(p) {
+            mc.blacklist.remove(&ep_key);
+        }
+    }
+}
+
+pub fn amnesty_blacklist_gradual(mc: &mut ModeCache, now_ts: i64) -> usize {
+    prune_expired_blacklist(mc, now_ts);
+    if mc.blacklist.is_empty() {
+        return 0;
+    }
+    let before = mc.blacklist.len();
+    let short_keys: Vec<String> = mc
+        .blacklist
+        .iter()
+        .filter(|(_, exp)| **exp - now_ts <= WATCHDOG_BLACKLIST_TTL_SECS)
+        .map(|(k, _)| k.clone())
+        .collect();
+    if !short_keys.is_empty() {
+        for k in short_keys {
+            mc.blacklist.remove(&k);
+        }
+        return before - mc.blacklist.len();
+    }
+    let mut ts_list: Vec<i64> = mc.blacklist.values().copied().collect();
+    ts_list.sort_unstable();
+    ts_list.dedup();
+    let half_idx = (ts_list.len() / 2).saturating_sub(1);
+    let cutoff = ts_list[half_idx];
+    mc.blacklist.retain(|_, exp| *exp > cutoff);
+    before - mc.blacklist.len()
 }
 
 pub fn sort_cached_working_prioritized(mc: &mut ModeCache) {
@@ -1277,7 +1524,7 @@ pub fn sort_cached_working_prioritized(mc: &mut ModeCache) {
         b.high_priority
             .cmp(&a.high_priority)
             .then_with(|| b.total_bytes.cmp(&a.total_bytes))
-            .then_with(|| a.last_delay_ms.cmp(&b.last_delay_ms))
+            .then_with(|| a.effective_quality_score().cmp(&b.effective_quality_score()))
     });
 }
 
@@ -1392,7 +1639,8 @@ async fn sync_mode_whitelist_state(state: &AppState, mode: FreeSubMode, target_n
 }
 
 /// Атомарная публикация проверенного набора в рабочий провайдер (`free_vpn` / `free_wl`).
-/// При `auto_connect == false` (фоновый добор) обновляет только YAML и пул Mihomo, никогда не перехватывая активный сервер.
+/// При `auto_connect == false` (фоновый добор) обновляет только YAML и пул Mihomo, никогда не перехватывая активный сервер
+/// (кроме случая, когда прежний активный узел пула уже попал в blacklist или исчез).
 async fn publish_and_connect(
     state: &AppState,
     mode: FreeSubMode,
@@ -1400,7 +1648,7 @@ async fn publish_and_connect(
     connect_node_name: Option<String>,
     auto_connect: bool,
     expected_gen: Option<u64>,
-) -> Result<(String, bool), String> {
+) -> Result<(String, bool, usize), String> {
     if let Some(g) = expected_gen {
         if current_mode_generation(mode) != g {
             return Err("Операция отменена пользователем".into());
@@ -1418,6 +1666,14 @@ async fn publish_and_connect(
         .map(parse_existing_provider_nodes)
         .unwrap_or_default();
 
+    let cp = cache_file_path(&state.config_path);
+    let now_ts = chrono::Utc::now().timestamp();
+    let mut cache = {
+        let _cg = FREE_SUB_CACHE_LOCK.lock().await;
+        load_disk_cache(&cp).await
+    };
+    prune_expired_blacklist(cache.mode_mut(mode), now_ts);
+
     let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
     let active_belongs_to_sub = active_srv.as_ref().is_some_and(|s| {
         s.provider.as_deref() == Some(provider_id)
@@ -1431,13 +1687,26 @@ async fn publish_and_connect(
         None
     };
     let active_leaf_opt = active_leaf_owned.as_deref();
+    let active_is_blacklisted = active_leaf_opt.is_some_and(|leaf| {
+        existing_nodes
+            .iter()
+            .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(leaf))
+            .map(|n| is_node_blacklisted(cache.mode_ref(mode), n, leaf, now_ts))
+            .unwrap_or_else(|| cache.mode_ref(mode).blacklist.get(leaf).is_some_and(|exp| *exp > now_ts))
+    });
 
-    let (final_nodes, preserved_active) =
-        merge_verified_with_active_session(verified_nodes, &existing_nodes, active_leaf_opt);
+    let (final_nodes, preserved_active) = merge_verified_with_active_session_checked(
+        verified_nodes,
+        &existing_nodes,
+        active_leaf_opt,
+        cache.mode_ref(mode),
+        now_ts,
+    );
 
     if final_nodes.is_empty() {
         return Err("Список проверенных узлов пуст; прежняя конфигурация сохранена".into());
     }
+    let published_count = final_nodes.len();
 
     let yaml = proxies_to_mihomo_yaml(&final_nodes)?;
     crate::api::servers::subscriptions::write_mobile_provider_yaml_atomic(&prov_path, &yaml).await?;
@@ -1530,7 +1799,6 @@ async fn publish_and_connect(
                 && prev.provider.as_deref() != Some(FREE_WL_PROVIDER_ID)
                 && !prev.id.is_empty()
             {
-                let cp = cache_file_path(&state.config_path);
                 let prev_id = prev.id.clone();
                 let _ = update_disk_cache(&cp, |c| {
                     c.previous_active_server = Some(prev_id);
@@ -1542,9 +1810,13 @@ async fn publish_and_connect(
             let cur = state.config.read().await;
             (cur.whitelist.enabled, cur.whitelist.target_server.clone())
         };
-        if mode == FreeSubMode::Whitelist {
+        // Синхронизируем routing config заранее только если режим БС ещё не был включён (чтобы avoid лишнего reload)
+        let pre_synced_wl = if mode == FreeSubMode::Whitelist && !prev_wl_enabled {
             sync_mode_whitelist_state(state, mode, Some(&target_name)).await?;
-        }
+            true
+        } else {
+            false
+        };
         let updated_cfg = state.config.read().await.clone();
         let mut switch_err: Option<String> = None;
         for attempt in 0..3 {
@@ -1575,17 +1847,30 @@ async fn publish_and_connect(
             return Err(e);
         }
         crate::failover::record_manual_switch(&target_name).await;
-        sync_mode_whitelist_state(state, mode, Some(&target_name)).await?;
+        if pre_synced_wl {
+            let _ = crate::api::sync_whitelist_mode_tunnel(state, &target_name).await;
+        } else {
+            sync_mode_whitelist_state(state, mode, Some(&target_name)).await?;
+        }
         record_session_start(state, mode, &final_nodes, &target_name).await;
-    } else if !auto_connect && active_belongs_to_sub && !preserved_active && !target_name.is_empty() {
+    } else if !auto_connect && (active_belongs_to_sub || active_is_blacklisted) && !preserved_active && !target_name.is_empty() {
         let updated_cfg = state.config.read().await.clone();
         if mihomo::switch_server(&state.http, &updated_cfg, &target_name).await.is_ok() {
+            if updated_cfg.whitelist.enabled != (mode == FreeSubMode::Whitelist) {
+                let _ = sync_mode_whitelist_state(state, mode, Some(&target_name)).await;
+            }
             record_session_start(state, mode, &final_nodes, &target_name).await;
-            log_i!("[FREE-SUB] Активный узел пула восстановлен на '{}' после обновления провайдера", target_name);
+            update_status(mode, |st| {
+                if !st.running || st.mode == mode {
+                    st.active_node = Some(target_name.clone());
+                }
+            })
+            .await;
+            log_i!("[FREE-SUB] Активный узел пула восстановлен/переключён на '{}' после обновления провайдера", target_name);
         }
     }
 
-    Ok((target_name, preserved_active))
+    Ok((target_name, preserved_active, published_count))
 }
 
 async fn record_session_start(state: &AppState, mode: FreeSubMode, pool: &[Value], node_name: &str) {
@@ -1660,6 +1945,43 @@ async fn fetch_sources_or_cache(
     mode: FreeSubMode,
     cache: &mut FreeSubCache,
 ) -> (Vec<Value>, Option<String>, usize) {
+    fetch_sources_or_cache_with(state, cfg, mode, cache, false).await
+}
+
+/// Смешивает распарсенные узлы из нескольких источников методом Round-Robin,
+/// сохраняя приоритетный порядок источников (курируемый документ -> CDN -> fallback).
+pub fn interleave_source_nodes(source_batches: Vec<Vec<Value>>, max_total: usize) -> Vec<Value> {
+    let mut iters: Vec<std::vec::IntoIter<Value>> =
+        source_batches.into_iter().map(|b| b.into_iter()).collect();
+    let mut out = Vec::new();
+    loop {
+        if out.len() >= max_total {
+            break;
+        }
+        let mut progressed = false;
+        for it in &mut iters {
+            if let Some(node) = it.next() {
+                out.push(node);
+                progressed = true;
+                if out.len() >= max_total {
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    out
+}
+
+async fn fetch_sources_or_cache_with(
+    state: &AppState,
+    cfg: &AppConfig,
+    mode: FreeSubMode,
+    cache: &mut FreeSubCache,
+    wait_all: bool,
+) -> (Vec<Value>, Option<String>, usize) {
     let sources = match mode {
         FreeSubMode::Vpn => VPN_SOURCES,
         FreeSubMode::Whitelist => WHITELIST_SOURCES,
@@ -1680,50 +2002,76 @@ async fn fetch_sources_or_cache(
         None
     };
 
-    const FAST_SOURCE_TIMEOUT_SECS: u64 = 6;
+    let source_timeout_secs: u64 = if wait_all { 10 } else { 6 };
 
-    // Параллельно запрашиваем каждый источник (перебирая зеркала внутри источника)
-    let futs = sources.iter().map(|src| {
-        let http = state.http.clone();
-        let proxied_ref = proxied.clone();
-        async move {
-            for url in src.urls {
-                let mut body_res =
-                    fetch_bounded_text(&http, url, MAX_RESPONSE_BYTES, FAST_SOURCE_TIMEOUT_SECS).await;
-                if body_res.is_err() {
-                    if let Some(ref p_client) = proxied_ref {
-                        body_res =
-                            fetch_bounded_text(p_client, url, MAX_RESPONSE_BYTES, FAST_SOURCE_TIMEOUT_SECS).await;
+    // Параллельно запрашиваем каждый источник с сохранением его приоритетного индекса:
+    // при wait_all=false как только первый источник вернул >= 20 узлов, даём остальным 2.5с добора;
+    // при wait_all=true ждём все источники (до 15с) для полного наполнения пула в фоне.
+    let mut futs: futures_util::stream::FuturesUnordered<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(src_idx, src)| {
+            let http = state.http.clone();
+            let proxied_ref = proxied.clone();
+            async move {
+                for url in src.urls {
+                    let mut body_res =
+                        fetch_bounded_text(&http, url, MAX_RESPONSE_BYTES, source_timeout_secs)
+                            .await;
+                    if body_res.is_err() {
+                        if let Some(ref p_client) = proxied_ref {
+                            body_res = fetch_bounded_text(
+                                p_client,
+                                url,
+                                MAX_RESPONSE_BYTES,
+                                source_timeout_secs,
+                            )
+                            .await;
+                        }
+                    }
+                    if let Ok(text) = body_res {
+                        let (nodes, rejected) =
+                            parse_subscription_nodes_bounded(&text, MAX_PARSED_NODES_PER_SOURCE);
+                        if !nodes.is_empty() {
+                            return Some((src_idx, src.label.to_string(), nodes, rejected.len()));
+                        }
                     }
                 }
-                if let Ok(text) = body_res {
-                    let (nodes, rejected) = parse_subscription_nodes_bounded(&text, MAX_PARSED_NODES);
-                    if !nodes.is_empty() {
-                        return Some((src.label.to_string(), nodes, rejected.len()));
-                    }
+                None
+            }
+        })
+        .collect();
+
+    let mut per_source: Vec<(usize, String, Vec<Value>)> = Vec::new();
+    let mut total_collected = 0usize;
+    let mut rejected_invalid = 0usize;
+    let total_deadline = tokio::time::Instant::now() + Duration::from_secs(if wait_all { 15 } else { 8 });
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
+
+    loop {
+        let deadline = grace_deadline.map_or(total_deadline, |g| g.min(total_deadline));
+        let next_res = tokio::time::timeout_at(deadline, futs.next()).await;
+        match next_res {
+            Ok(Some(Some((src_idx, label, nodes, rej_count)))) => {
+                rejected_invalid += rej_count;
+                total_collected = total_collected.saturating_add(nodes.len());
+                per_source.push((src_idx, label, nodes));
+                if !wait_all && total_collected >= 20 && grace_deadline.is_none() {
+                    grace_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(2500));
+                }
+                if total_collected >= MAX_PARSED_NODES {
+                    break;
                 }
             }
-            None
-        }
-    });
-
-    let results = futures_util::future::join_all(futs).await;
-    let mut collected = Vec::new();
-    let mut rejected_invalid = 0usize;
-    let mut used_source: Option<String> = None;
-
-    for item in results.into_iter().flatten() {
-        let (label, nodes, rej_count) = item;
-        rejected_invalid += rej_count;
-        let remaining = MAX_PARSED_NODES.saturating_sub(collected.len());
-        if remaining == 0 {
-            break;
-        }
-        collected.extend(nodes.into_iter().take(remaining));
-        if used_source.is_none() {
-            used_source = Some(label);
+            Ok(Some(None)) => continue,
+            Ok(None) | Err(_) => break,
         }
     }
+
+    per_source.sort_by_key(|(idx, _, _)| *idx);
+    let used_source = per_source.first().map(|(_, label, _)| label.clone());
+    let batches: Vec<Vec<Value>> = per_source.into_iter().map(|(_, _, nodes)| nodes).collect();
+    let collected = interleave_source_nodes(batches, MAX_PARSED_NODES);
 
     if !collected.is_empty() {
         let now_ts = chrono::Utc::now().timestamp();
@@ -1756,6 +2104,52 @@ async fn fetch_sources_or_cache(
     (Vec::new(), None, rejected_invalid)
 }
 
+/// Асинхронный запуск с синхронным захватом `run_lock(mode)` и выставлением `running: true` ДО возврата HTTP-ответа (убирает гонку с GET status).
+pub async fn spawn_one_click_connect(state: AppState, mode: FreeSubMode) -> Result<FreeSubStatus, String> {
+    spawn_free_sub_job(state, mode, true).await
+}
+
+pub async fn spawn_background_refill(state: AppState, mode: FreeSubMode) -> Result<FreeSubStatus, String> {
+    spawn_free_sub_job(state, mode, false).await
+}
+
+async fn spawn_free_sub_job(
+    state: AppState,
+    mode: FreeSubMode,
+    auto_connect: bool,
+) -> Result<FreeSubStatus, String> {
+    let guard = run_lock(mode)
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "Поиск и подключение бесплатной подписки уже выполняется".to_string())?;
+
+    let my_gen = bump_mode_generation(mode);
+    let started = Instant::now();
+    let stage_label = if auto_connect {
+        "Загрузка компактных источников и кэша…".to_string()
+    } else {
+        "Фоновый добор свежих узлов…".to_string()
+    };
+    let status_snapshot = {
+        let mut st = status_lock(mode).write().await;
+        *st = FreeSubStatus {
+            running: true,
+            mode,
+            stage: FreeSubStage::Sources,
+            stage_label,
+            updated_at: Some(chrono::Utc::now().timestamp()),
+            ..Default::default()
+        };
+        st.clone()
+    };
+
+    tokio::spawn(async move {
+        let _ = run_free_sub_job_with_guard(guard, state, mode, auto_connect, my_gen, started).await;
+    });
+
+    Ok(status_snapshot)
+}
+
 /// Запуск полного конвейера подключения бесплатной мульти-подписки в 1 клик.
 pub async fn start_one_click_connect(state: AppState, mode: FreeSubMode) -> Result<FreeSubStatus, String> {
     run_free_sub_job(state, mode, true).await
@@ -1771,13 +2165,14 @@ async fn run_free_sub_job(
     mode: FreeSubMode,
     auto_connect: bool,
 ) -> Result<FreeSubStatus, String> {
-    let _guard = FREE_SUB_RUN_LOCK
-        .try_lock()
+    let guard = run_lock(mode)
+        .clone()
+        .try_lock_owned()
         .map_err(|_| "Поиск и подключение бесплатной подписки уже выполняется".to_string())?;
 
     let my_gen = bump_mode_generation(mode);
     let started = Instant::now();
-    update_status(|st| {
+    update_status(mode, |st| {
         *st = FreeSubStatus {
             running: true,
             mode,
@@ -1789,11 +2184,22 @@ async fn run_free_sub_job(
     })
     .await;
 
+    run_free_sub_job_with_guard(guard, state, mode, auto_connect, my_gen, started).await
+}
+
+async fn run_free_sub_job_with_guard(
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    state: AppState,
+    mode: FreeSubMode,
+    auto_connect: bool,
+    my_gen: u64,
+    started: Instant,
+) -> Result<FreeSubStatus, String> {
     match run_free_sub_job_inner(state, mode, auto_connect, my_gen, started).await {
         Ok(status) => Ok(status),
         Err(msg) => {
             log_e!("[FREE-SUB] Ошибка конвейера (mode={mode:?}): {msg}");
-            update_status(|st| {
+            update_status(mode, |st| {
                 st.running = false;
                 st.stage = FreeSubStage::Error;
                 st.stage_label = "Ошибка подключения".to_string();
@@ -1841,17 +2247,17 @@ async fn run_free_sub_job_inner(
         .filter_map(|w| sanitize_proxy_value(&w.proxy))
         .collect();
 
-    let mut fast_verified: Vec<(Value, i64)> = Vec::new();
+    let mut fast_verified: Vec<(Value, mihomo::L7ProbeMetrics)> = Vec::new();
     if auto_connect && !cached_working.is_empty() {
-        update_status(|st| {
+        update_status(mode, |st| {
             st.stage = FreeSubStage::L7;
             st.stage_label = "Быстрая L7-проверка ранее работавших узлов из кэша…".to_string();
         })
         .await;
-        let fast_res = run_l7_batch_probe(&state, &cached_working, true).await;
+        let fast_res = run_l7_batch_probe(&state, mode, &cached_working, true).await;
         let mut seen_k: HashSet<String> = HashSet::new();
         let mut seen_eps: HashSet<String> = HashSet::new();
-        for (node, delay) in fast_res {
+        for (node, metrics) in fast_res {
             let nm = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if is_node_blacklisted(cache.mode_ref(mode), &node, nm, now_ts) {
                 continue;
@@ -1863,14 +2269,14 @@ async fn run_free_sub_job_inner(
                 .map(|ep| seen_eps.insert(ep))
                 .unwrap_or(true);
             if ep_ok {
-                fast_verified.push((node, delay));
+                fast_verified.push((node, metrics));
             }
         }
     }
 
     if auto_connect && !fast_verified.is_empty() {
         let ttff = started.elapsed().as_millis() as u64;
-        update_status(|st| {
+        update_status(mode, |st| {
             st.ttff_ms = Some(ttff);
             st.stage = FreeSubStage::Publishing;
             st.stage_label = "Публикация и подключение рабочего узла из кэша…".to_string();
@@ -1883,17 +2289,16 @@ async fn run_free_sub_job_inner(
             .and_then(|n| n.get("name"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let fast_pool_len = fast_pool.len();
-        if let Ok((active_name, preserved)) =
+        if let Ok((active_name, preserved, published_count)) =
             publish_and_connect(&state, mode, fast_pool.clone(), first_name, true, Some(my_gen)).await
         {
-            update_status(|st| {
+            update_status(mode, |st| {
                 st.running = false;
                 st.stage = FreeSubStage::Connected;
                 st.stage_label = format!("Подключено ({active_name}) за {ttff} мс");
                 st.active_node = Some(active_name);
                 st.preserved_active = preserved;
-                st.stats.working_count = fast_pool_len;
+                st.stats.working_count = published_count;
                 st.source_used = Some("Быстрый кэш".to_string());
                 st.updated_at = Some(chrono::Utc::now().timestamp());
             })
@@ -1912,7 +2317,7 @@ async fn run_free_sub_job_inner(
                     }
                     let bg_now = chrono::Utc::now().timestamp();
                     let (raw_nodes, _source_used, _rejected) =
-                        fetch_sources_or_cache(&bg_state, &bg_cfg, mode, &mut bg_cache).await;
+                        fetch_sources_or_cache_with(&bg_state, &bg_cfg, mode, &mut bg_cache, true).await;
                     let (deduped_raw, _) = deduplicate_proxies(raw_nodes);
                     let existing_keys: HashSet<String> =
                         fast_verified.iter().map(|(n, _)| node_dedup_key(n)).collect();
@@ -1992,7 +2397,7 @@ async fn run_free_sub_job_inner(
                         TCP_FAST_TIMEOUT_MS,
                         TCP_MAX_CONCURRENT,
                         TCP_RATE_INTERVAL_MS,
-                        Duration::from_secs(TCP_PHASE_BUDGET_SECS),
+                        Duration::from_secs(12),
                     )
                     .await;
                     let tcp_passed_candidates: Vec<CandidateNode> = tcp_candidates
@@ -2009,23 +2414,25 @@ async fn run_free_sub_job_inner(
                     if !remaining_for_bg.is_empty() && current_mode_generation(mode) == my_gen {
                         run_background_l7_refill(
                             bg_state,
+                            bg_cfg,
                             bg_cache_path,
                             mode,
                             my_gen,
                             true,
                             fast_verified,
                             remaining_for_bg,
+                            Vec::new(),
                         )
                         .await;
                     }
                 });
             }
-            return Ok(get_status().await);
+            return Ok(get_status_for(mode).await);
         }
     }
 
     // Загрузка источников / резервного seed-кэша
-    update_status(|st| {
+    update_status(mode, |st| {
         st.stage = FreeSubStage::Sources;
         st.stage_label = "Загрузка источников (RU-зеркала / туннель / seed-кэш)…".to_string();
     })
@@ -2043,16 +2450,26 @@ async fn run_free_sub_job_inner(
         .cloned()
         .collect();
     if deduped_nodes.is_empty() && !deduped_raw.is_empty() && !cache.mode_ref(mode).blacklist.is_empty() {
-        log_w!("[FREE-SUB] Все {} узлов в blacklist — выполняем авто-амнистию чёрного списка (mode={mode:?})", deduped_raw.len());
-        cache.mode_mut(mode).blacklist.clear();
+        log_w!("[FREE-SUB] Все {} узлов в blacklist — выполняем градуальную амнистию ЧС (mode={mode:?})", deduped_raw.len());
+        amnesty_blacklist_gradual(cache.mode_mut(mode), now_ts);
         let _ = update_disk_cache(&cache_path, |c| {
-            c.mode_mut(mode).blacklist.clear();
+            amnesty_blacklist_gradual(c.mode_mut(mode), now_ts);
         })
         .await;
-        deduped_nodes = deduped_raw;
+        deduped_nodes = deduped_raw
+            .iter()
+            .filter(|p| {
+                let n = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                !is_node_blacklisted(cache.mode_ref(mode), p, n, now_ts)
+            })
+            .cloned()
+            .collect();
+        if deduped_nodes.is_empty() {
+            deduped_nodes = deduped_raw.clone();
+        }
     }
     let deduped_nodes = diversify_by_endpoint(deduped_nodes, MAX_PER_ENDPOINT_IN_POOL);
-    update_status(|st| {
+    update_status(mode, |st| {
         st.source_used = source_used.clone();
         st.stats.total_raw = total_raw;
         st.stats.rejected_invalid = rejected_invalid;
@@ -2062,7 +2479,7 @@ async fn run_free_sub_job_inner(
 
     if deduped_nodes.is_empty() {
         let msg = "Не удалось получить ни одного валидного узла из источников и локального кэша. Прежняя конфигурация сохранена.".to_string();
-        update_status(|st| {
+        update_status(mode, |st| {
             st.running = false;
             st.stage = FreeSubStage::Error;
             st.stage_label = "Нет доступных узлов".to_string();
@@ -2074,7 +2491,7 @@ async fn run_free_sub_job_inner(
     }
 
     // DNS-резолв + отбрасывание loopback/LAN/приватных IP
-    update_status(|st| {
+    update_status(mode, |st| {
         st.stage = FreeSubStage::Prefilter;
         st.stage_label = format!("DNS-проверка и предфильтр ({} кандидатов)…", deduped_nodes.len());
     })
@@ -2115,7 +2532,7 @@ async fn run_free_sub_job_inner(
             }
         }
     }
-    update_status(|st| st.stats.rejected_dns = rejected_dns).await;
+    update_status(mode, |st| st.stats.rejected_dns = rejected_dns).await;
 
     // Мягкая квота /24 (диверсификация порядка очереди, без потери узлов)
     let (primary_q, deferred_q) = apply_soft_subnet_quota(
@@ -2142,17 +2559,20 @@ async fn run_free_sub_job_inner(
         .iter()
         .flat_map(|c| c.resolved_addrs.iter().take(2).copied())
         .collect();
-    let wave1_outcomes = run_tcp_prefilter_endpoints(
+    let wave1_outcomes = run_tcp_prefilter_endpoints_budgeted(
         tcp_endpoints_wave1,
         TCP_FAST_TIMEOUT_MS,
         TCP_MAX_CONCURRENT,
         TCP_RATE_INTERVAL_MS,
         Duration::from_secs(TCP_PHASE_BUDGET_SECS),
+        Some(24),
     )
     .await;
 
+    let tcp_candidates_total = tcp_candidates.len();
     let mut tcp_passed_candidates = Vec::new();
     let mut timed_out_candidates = Vec::new();
+    let mut unchecked_tcp_candidates = Vec::new();
     for c in tcp_candidates {
         let any_ok = c
             .resolved_addrs
@@ -2168,51 +2588,121 @@ async fn run_free_sub_job_inner(
             .any(|ep| wave1_outcomes.get(ep) == Some(&TcpOutcome::TimedOutFast))
         {
             timed_out_candidates.push(c);
+        } else if !c
+            .resolved_addrs
+            .iter()
+            .take(2)
+            .any(|ep| wave1_outcomes.contains_key(ep))
+        {
+            unchecked_tcp_candidates.push(c);
         }
     }
+    let tcp_checked_candidates = tcp_candidates_total.saturating_sub(unchecked_tcp_candidates.len());
     let tcp_passed_count = tcp_passed_candidates.len();
     let l7_ready_proxies = prioritize_l7_ready_proxies(tcp_passed_candidates, quic_udp_candidates);
-    update_status(|st| {
-        st.stats.tcp_checked = wave1_outcomes.len();
+    update_status(mode, |st| {
+        st.stats.tcp_checked = tcp_checked_candidates;
         st.stats.tcp_passed = tcp_passed_count;
     })
     .await;
 
-    // Шаг C: L7-проверка партиями до первого рабочего узла
-    update_status(|st| {
+    // Шаг C: L7-проверка партиями до первого рабочего узла (с бюджетом 32 узла / 20с для быстрого TTFF)
+    update_status(mode, |st| {
         st.stage = FreeSubStage::L7;
         st.stage_label = format!("Точечная L7-проверка ({} кандидатов)…", l7_ready_proxies.len());
     })
     .await;
 
-    let mut verified_nodes: Vec<(Value, i64)> = Vec::new();
+    let mut verified_nodes: Vec<(Value, mihomo::L7ProbeMetrics)> = Vec::new();
     let mut remaining_for_bg: Vec<Value> = Vec::new();
+    let fg_l7_started = Instant::now();
+    let fg_limit = l7_ready_proxies.len().min(FOREGROUND_L7_MAX_CANDIDATES);
 
-    for (batch_idx, chunk) in l7_ready_proxies.chunks(L7_BATCH_SIZE).enumerate() {
-        if verified_nodes.is_empty() {
-            let res = run_l7_batch_probe(&state, chunk, true).await;
+    for (batch_idx, chunk) in l7_ready_proxies[..fg_limit].chunks(L7_BATCH_SIZE).enumerate() {
+        if current_mode_generation(mode) != my_gen {
+            return Err("Операция отменена пользователем".into());
+        }
+        if fg_l7_started.elapsed() >= Duration::from_secs(FOREGROUND_L7_BUDGET_SECS) {
+            let rest_start = batch_idx * L7_BATCH_SIZE;
+            if rest_start < l7_ready_proxies.len() {
+                remaining_for_bg.extend_from_slice(&l7_ready_proxies[rest_start..]);
+            }
+            break;
+        }
+        let res = run_l7_batch_probe(&state, mode, chunk, true).await;
+        if !res.is_empty() {
+            let verified_keys: HashSet<String> =
+                res.iter().map(|(n, _)| node_dedup_key(n)).collect();
+            for n in chunk {
+                if !verified_keys.contains(&node_dedup_key(n)) {
+                    remaining_for_bg.push(n.clone());
+                }
+            }
+            verified_nodes.extend(res);
+            let rest_start = (batch_idx + 1) * L7_BATCH_SIZE;
+            if rest_start < l7_ready_proxies.len() {
+                remaining_for_bg.extend_from_slice(&l7_ready_proxies[rest_start..]);
+            }
+            break;
+        }
+    }
+
+    // Быстрая мягкая амнистия ЧС до долгой Wave 2, если Wave 1 не нашла ни одного живого узла
+    if verified_nodes.is_empty() && !cache.mode_ref(mode).blacklist.is_empty() {
+        if current_mode_generation(mode) != my_gen {
+            return Err("Операция отменена пользователем".into());
+        }
+        log_w!("[FREE-SUB] Wave 1 не дала живых узлов при непустом blacklist — выполняем градуальную амнистию ЧС (mode={mode:?})");
+        let prev_working: Vec<Value> = cache
+            .mode_ref(mode)
+            .working_nodes
+            .iter()
+            .filter_map(|w| sanitize_proxy_value(&w.proxy))
+            .take(8)
+            .collect();
+        let amnesty_ts = chrono::Utc::now().timestamp();
+        amnesty_blacklist_gradual(cache.mode_mut(mode), amnesty_ts);
+        let _ = update_disk_cache(&cache_path, |c| {
+            amnesty_blacklist_gradual(c.mode_mut(mode), amnesty_ts);
+        })
+        .await;
+        let amnesty_pool: Vec<Value> = if !prev_working.is_empty() {
+            prev_working
+                .into_iter()
+                .filter(|p| {
+                    let n = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    !is_node_blacklisted(cache.mode_ref(mode), p, n, amnesty_ts)
+                })
+                .collect()
+        } else {
+            deduped_raw
+                .iter()
+                .filter(|p| {
+                    let n = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    !is_node_blacklisted(cache.mode_ref(mode), p, n, amnesty_ts)
+                })
+                .take(16)
+                .cloned()
+                .collect()
+        };
+        for chunk in amnesty_pool.chunks(L7_BATCH_SIZE) {
+            if current_mode_generation(mode) != my_gen {
+                return Err("Операция отменена пользователем".into());
+            }
+            let res = run_l7_batch_probe(&state, mode, chunk, true).await;
             if !res.is_empty() {
-                let verified_keys: HashSet<String> =
-                    res.iter().map(|(n, _)| node_dedup_key(n)).collect();
-                // Остальные кандидаты текущей партии + следующие партии пойдут в фон (R26)
-                for n in chunk {
-                    if !verified_keys.contains(&node_dedup_key(n)) {
-                        remaining_for_bg.push(n.clone());
-                    }
-                }
                 verified_nodes.extend(res);
-                let rest_start = (batch_idx + 1) * L7_BATCH_SIZE;
-                if rest_start < l7_ready_proxies.len() {
-                    remaining_for_bg.extend_from_slice(&l7_ready_proxies[rest_start..]);
-                }
                 break;
             }
         }
     }
 
-    // Повторная волна TCP (>= 1500 мс) если не найдено ни одного рабочего узла
+    // Повторная волна TCP (>= 1500 мс) если не найдено ни одного рабочего узла (не более 16 кандидатов / 10 с)
     if verified_nodes.is_empty() && !timed_out_candidates.is_empty() {
-        update_status(|st| {
+        if current_mode_generation(mode) != my_gen {
+            return Err("Операция отменена пользователем".into());
+        }
+        update_status(mode, |st| {
             st.stage = FreeSubStage::Prefilter;
             st.stage_label = format!(
                 "Повторный TCP-предфильтр с увеличенным таймаутом ({} узлов)…",
@@ -2242,16 +2732,26 @@ async fn run_free_sub_job_inner(
                 retry_l7.push(c.proxy.clone());
             }
         }
-        update_status(|st| {
-            st.stats.tcp_retried = wave2_outcomes.len();
-            st.stats.tcp_passed += retry_l7.len();
+        let retry_cap = retry_l7.len().min(16);
+        let wave2_checked_count = timed_out_candidates.len();
+        update_status(mode, |st| {
+            st.stats.tcp_retried = wave2_checked_count;
+            st.stats.tcp_checked += wave2_checked_count;
+            st.stats.tcp_passed = (st.stats.tcp_passed + retry_l7.len()).min(st.stats.tcp_checked);
             st.stage = FreeSubStage::L7;
-            st.stage_label = format!("L7-проверка после повтора ({} кандидатов)…", retry_l7.len());
+            st.stage_label = format!("L7-проверка после повтора ({retry_cap} кандидатов)…");
         })
         .await;
 
-        for (batch_idx, chunk) in retry_l7.chunks(L7_BATCH_SIZE).enumerate() {
-            let res = run_l7_batch_probe(&state, chunk, true).await;
+        let w2_started = Instant::now();
+        for (batch_idx, chunk) in retry_l7[..retry_cap].chunks(L7_BATCH_SIZE).enumerate() {
+            if current_mode_generation(mode) != my_gen {
+                return Err("Операция отменена пользователем".into());
+            }
+            if w2_started.elapsed() >= Duration::from_secs(10) {
+                break;
+            }
+            let res = run_l7_batch_probe(&state, mode, chunk, true).await;
             if !res.is_empty() {
                 let verified_keys: HashSet<String> =
                     res.iter().map(|(n, _)| node_dedup_key(n)).collect();
@@ -2271,10 +2771,11 @@ async fn run_free_sub_job_inner(
     }
 
     if verified_nodes.is_empty() {
+        let now_fail_ts = chrono::Utc::now().timestamp();
         let _ = update_disk_cache(&cache_path, |c| {
             *c.mode_mut(mode) = cache.mode_ref(mode).clone();
             if c.mode_ref(mode).blacklist.len() >= 10 {
-                c.mode_mut(mode).blacklist.clear();
+                amnesty_blacklist_gradual(c.mode_mut(mode), now_fail_ts);
             }
         })
         .await;
@@ -2283,7 +2784,7 @@ async fn run_free_sub_job_inner(
     }
 
     let ttff = started.elapsed().as_millis() as u64;
-    update_status(|st| {
+    update_status(mode, |st| {
         st.ttff_ms = Some(ttff);
         st.stage = FreeSubStage::Publishing;
         st.stage_label = "Атомарная публикация и подключение…".to_string();
@@ -2291,16 +2792,30 @@ async fn run_free_sub_job_inner(
     .await;
 
     let now_ts = chrono::Utc::now().timestamp();
+    {
+        let mut ping_map = std::collections::BTreeMap::new();
+        for (node, metrics) in &verified_nodes {
+            if metrics.rtt_ms > 0 {
+                if let Some(nm) = node.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    ping_map.insert(nm.to_string(), metrics.rtt_ms);
+                }
+            }
+        }
+        if !ping_map.is_empty() {
+            mihomo::store_ping_cache(&ping_map);
+        }
+    }
     let _ = update_disk_cache(&cache_path, |disk| {
         let mc = disk.mode_mut(mode);
-        for (node, delay) in &verified_nodes {
+        for (node, metrics) in &verified_nodes {
             mc.working_nodes.retain(|w| node_dedup_key(&w.proxy) != node_dedup_key(node));
             mc.working_nodes.insert(
                 0,
                 CachedWorkingNode {
                     proxy: node.clone(),
                     last_ok_ts: now_ts,
-                    last_delay_ms: *delay,
+                    last_delay_ms: metrics.rtt_ms,
+                    quality_score: metrics.quality_score,
                     mode,
                     high_priority: false,
                     total_bytes: 0,
@@ -2322,7 +2837,7 @@ async fn run_free_sub_job_inner(
         None
     };
 
-    let (active_name, preserved) = publish_and_connect(
+    let (active_name, preserved, published_count) = publish_and_connect(
         &state,
         mode,
         first_proxies.clone(),
@@ -2333,80 +2848,76 @@ async fn run_free_sub_job_inner(
     .await?;
     log_i!("[FREE-SUB] ✓ Опубликовано (auto_connect={auto_connect}) узел '{active_name}' за {ttff} мс (mode={mode:?})");
 
-    update_status(|st| {
+    update_status(mode, |st| {
         st.running = false;
         st.stage = FreeSubStage::Connected;
         st.stage_label = if auto_connect {
             format!("Подключено ({active_name}) за {ttff} мс")
         } else {
-            format!("Пул обновлён ({} узл.) за {ttff} мс", first_proxies.len())
+            format!("Пул обновлён ({published_count} узл.) за {ttff} мс")
         };
         st.active_node = if auto_connect { Some(active_name) } else { st.active_node.clone() };
         st.preserved_active = preserved;
-        st.stats.working_count = first_proxies.len();
+        st.stats.working_count = published_count;
         st.updated_at = Some(chrono::Utc::now().timestamp());
     })
     .await;
 
     // Фоновый добор до BACKGROUND_BACKUP_TARGET (20) резервных узлов;
-    // если найден существенно более быстрый узел (или TCP вместо QUIC/UDP), автоматически переключаемся на него.
-    if !remaining_for_bg.is_empty() && verified_nodes.len() < BACKGROUND_BACKUP_TARGET {
+    // проверяет остаток Wave 1, все непроверенные из-за раннего стопа TCP-кандидаты и догружает все источники (wait_all=true).
+    if verified_nodes.len() < BACKGROUND_BACKUP_TARGET {
         let bg_state = state.clone();
+        let bg_cfg = cfg.clone();
         let bg_cache_path = cache_path.clone();
+        let mut bg_extra_candidates = unchecked_tcp_candidates;
+        bg_extra_candidates.extend(timed_out_candidates);
         tokio::spawn(async move {
             run_background_l7_refill(
                 bg_state,
+                bg_cfg,
                 bg_cache_path,
                 mode,
                 my_gen,
                 auto_connect,
                 verified_nodes,
                 remaining_for_bg,
+                bg_extra_candidates,
             )
             .await;
         });
     }
 
-    Ok(get_status().await)
+    Ok(get_status_for(mode).await)
 }
 
-/// Фоновый L7-добор резервных узлов до `BACKGROUND_BACKUP_TARGET` (20)
-/// без жёсткого потолка на число партий (ограничен целью пула, сменой поколения и общим бюджетом времени).
-async fn run_background_l7_refill(
-    bg_state: AppState,
-    bg_cache_path: PathBuf,
+/// Вспомогательная проверка L7-кандидатов партиями с инкрементальной публикацией, авто-апгрейдом и записью пингов в кэш.
+#[allow(clippy::too_many_arguments)]
+async fn run_bg_l7_chunks(
+    bg_state: &AppState,
+    bg_cache_path: &Path,
     mode: FreeSubMode,
     my_gen: u64,
     auto_connect: bool,
-    verified_nodes: Vec<(Value, i64)>,
-    remaining_for_bg: Vec<Value>,
+    bg_started: Instant,
+    proxies: &[Value],
+    extra: &mut Vec<Value>,
+    seen_eps: &mut HashSet<String>,
+    metrics_by_key: &mut HashMap<String, mihomo::L7ProbeMetrics>,
+    cur_active_score: &mut i64,
+    cur_active_is_quic: &mut bool,
+    last_published_len: &mut usize,
 ) {
-    let bg_started = Instant::now();
-    let mut extra: Vec<Value> = verified_nodes.iter().map(|(n, _)| n.clone()).collect();
-    let mut seen_eps: HashSet<String> = extra
-        .iter()
-        .filter_map(endpoint_blacklist_key)
-        .collect();
-    let mut delay_by_key: HashMap<String, i64> = verified_nodes
-        .iter()
-        .map(|(n, d)| (node_dedup_key(n), *d))
-        .collect();
-    let mut cur_active_delay = verified_nodes.first().map(|(_, d)| *d).unwrap_or(999);
-    let mut cur_active_is_quic = verified_nodes
-        .first()
-        .is_some_and(|(n, _)| is_quic_udp_node(n));
-    let mut last_published_len = extra.len();
-
-    for chunk in remaining_for_bg.chunks(L7_BATCH_SIZE) {
+    for chunk in proxies.chunks(L7_BATCH_SIZE) {
         if current_mode_generation(mode) != my_gen
             || extra.len() >= BACKGROUND_BACKUP_TARGET
             || bg_started.elapsed() >= Duration::from_secs(BACKGROUND_REFILL_BUDGET_SECS)
         {
             break;
         }
-        let res = run_l7_batch_probe(&bg_state, chunk, false).await;
+        let res = run_l7_batch_probe(bg_state, mode, chunk, false).await;
         let mut upgrade_target: Option<(String, i64, bool)> = None;
-        for (n, delay) in res {
+        let mut ping_map = std::collections::BTreeMap::new();
+        for (n, metrics) in res {
             if extra.len() >= BACKGROUND_BACKUP_TARGET {
                 break;
             }
@@ -2422,56 +2933,69 @@ async fn run_background_l7_refill(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            delay_by_key.insert(node_dedup_key(&n), delay);
+            if metrics.rtt_ms > 0 && !n_name.is_empty() {
+                ping_map.insert(n_name.clone(), metrics.rtt_ms);
+            }
+            metrics_by_key.insert(node_dedup_key(&n), metrics);
             if auto_connect
                 && upgrade_target.is_none()
                 && !n_name.is_empty()
                 && !is_recent_manual_pool_switch(120)
-                && should_upgrade_active_node(cur_active_delay, cur_active_is_quic, delay, n_is_quic)
+                && should_upgrade_active_node(
+                    *cur_active_score,
+                    *cur_active_is_quic,
+                    metrics.quality_score,
+                    n_is_quic,
+                )
             {
-                upgrade_target = Some((n_name, delay, n_is_quic));
+                upgrade_target = Some((n_name, metrics.quality_score, n_is_quic));
             }
             extra.push(n);
+        }
+        if !ping_map.is_empty() {
+            mihomo::store_ping_cache(&ping_map);
         }
         if current_mode_generation(mode) != my_gen {
             return;
         }
-        if extra.len() > last_published_len || upgrade_target.is_some() {
+        if extra.len() > *last_published_len || upgrade_target.is_some() {
             let count = extra.len();
             let switch_name = upgrade_target.as_ref().map(|(nm, _, _)| nm.clone());
             let do_connect = switch_name.is_some();
-            if publish_and_connect(&bg_state, mode, extra.clone(), switch_name.clone(), do_connect, Some(my_gen))
-                .await
-                .is_ok()
+            if let Ok((_, _, published_count)) =
+                publish_and_connect(bg_state, mode, extra.clone(), switch_name.clone(), do_connect, Some(my_gen))
+                    .await
             {
-                last_published_len = count;
-                if let Some((ref new_name, new_delay, new_quic)) = upgrade_target {
+                *last_published_len = count;
+                if let Some((ref new_name, new_score, new_quic)) = upgrade_target {
                     log_i!(
-                        "[FREE-SUB] Фоновый добор: авто-переключение на более быстрый узел '{}' ({} мс вместо {} мс)",
+                        "[FREE-SUB] Фоновый добор: авто-переключение на более быстрый узел '{}' (score {} мс вместо {} мс)",
                         new_name,
-                        new_delay,
-                        cur_active_delay
+                        new_score,
+                        *cur_active_score
                     );
-                    cur_active_delay = new_delay;
-                    cur_active_is_quic = new_quic;
-                    update_status(|st| {
-                        if !st.running || st.mode == mode {
-                            st.active_node = Some(new_name.clone());
-                        }
+                    *cur_active_score = new_score;
+                    *cur_active_is_quic = new_quic;
+                    update_status(mode, |st| {
+                        st.active_node = Some(new_name.clone());
                     })
                     .await;
                 }
                 let ts = chrono::Utc::now().timestamp();
-                let _ = update_disk_cache(&bg_cache_path, |c| {
+                let _ = update_disk_cache(bg_cache_path, |c| {
                     let mc = c.mode_mut(mode);
-                    for n in &extra {
+                    for n in extra.iter() {
                         let dk = node_dedup_key(n);
                         if !mc.working_nodes.iter().any(|w| node_dedup_key(&w.proxy) == dk) {
-                            let node_delay = delay_by_key.get(&dk).copied().unwrap_or(999);
+                            let m = metrics_by_key.get(&dk).copied().unwrap_or(mihomo::L7ProbeMetrics {
+                                rtt_ms: 999,
+                                quality_score: 999,
+                            });
                             mc.working_nodes.push(CachedWorkingNode {
                                 proxy: n.clone(),
                                 last_ok_ts: ts,
-                                last_delay_ms: node_delay,
+                                last_delay_ms: m.rtt_ms,
+                                quality_score: m.quality_score,
                                 mode,
                                 high_priority: false,
                                 total_bytes: 0,
@@ -2481,19 +3005,247 @@ async fn run_background_l7_refill(
                     mc.working_nodes.truncate(BACKGROUND_BACKUP_TARGET);
                 })
                 .await;
-                update_status(|st| {
-                    if !st.running || st.mode == mode {
-                        st.stats.working_count = count;
-                    }
+                update_status(mode, |st| {
+                    st.stats.working_count = published_count;
                 })
                 .await;
-                log_i!("[FREE-SUB] Фоновый добор: опубликовано {count} рабочих узлов");
+                log_i!("[FREE-SUB] Фоновый добор: опубликовано {published_count} рабочих узлов");
             }
         }
     }
 }
 
-/// Добавить обе виртуальные подписки (`free_vpn` и `free_wl`) в config.yaml в 1 клик.
+/// Фоновый L7-добор резервных узлов до `BACKGROUND_BACKUP_TARGET` (20):
+/// 1) остаток TCP-проверенных узлов Wave 1;
+/// 2) все оставшиеся непроверенные кандидаты (снятие 24-IP потолка);
+/// 3) дозагрузка всех источников (`wait_all=true`), если в пуле всё ещё < 20 уникальных серверов.
+#[allow(clippy::too_many_arguments)]
+async fn run_background_l7_refill(
+    bg_state: AppState,
+    bg_cfg: Arc<AppConfig>,
+    bg_cache_path: PathBuf,
+    mode: FreeSubMode,
+    my_gen: u64,
+    auto_connect: bool,
+    verified_nodes: Vec<(Value, mihomo::L7ProbeMetrics)>,
+    remaining_for_bg: Vec<Value>,
+    unchecked_candidates: Vec<CandidateNode>,
+) {
+    let bg_started = Instant::now();
+    let mut extra: Vec<Value> = verified_nodes.iter().map(|(n, _)| n.clone()).collect();
+    let mut seen_eps: HashSet<String> = extra
+        .iter()
+        .filter_map(endpoint_blacklist_key)
+        .collect();
+    let mut metrics_by_key: HashMap<String, mihomo::L7ProbeMetrics> = verified_nodes
+        .iter()
+        .map(|(n, m)| (node_dedup_key(n), *m))
+        .collect();
+    let mut cur_active_score = verified_nodes
+        .first()
+        .map(|(_, m)| m.quality_score)
+        .unwrap_or(999);
+    let mut cur_active_is_quic = verified_nodes
+        .first()
+        .is_some_and(|(n, _)| is_quic_udp_node(n));
+    let mut last_published_len = extra.len();
+
+    // Фаза 1: уже прошедшие TCP-предфильтр кандидаты из Wave 1
+    if !remaining_for_bg.is_empty() {
+        run_bg_l7_chunks(
+            &bg_state,
+            &bg_cache_path,
+            mode,
+            my_gen,
+            auto_connect,
+            bg_started,
+            &remaining_for_bg,
+            &mut extra,
+            &mut seen_eps,
+            &mut metrics_by_key,
+            &mut cur_active_score,
+            &mut cur_active_is_quic,
+            &mut last_published_len,
+        )
+        .await;
+    }
+
+    // Фаза 2: все непроверенные из-за раннего стопа TCP на 24 IP кандидаты (без 24-IP потолка)
+    if current_mode_generation(mode) == my_gen
+        && extra.len() < BACKGROUND_BACKUP_TARGET
+        && !unchecked_candidates.is_empty()
+        && bg_started.elapsed() < Duration::from_secs(BACKGROUND_REFILL_BUDGET_SECS)
+    {
+        let novel_candidates: Vec<CandidateNode> = unchecked_candidates
+            .into_iter()
+            .filter(|c| {
+                endpoint_blacklist_key(&c.proxy)
+                    .map(|ep| !seen_eps.contains(&ep))
+                    .unwrap_or(true)
+            })
+            .collect();
+        if !novel_candidates.is_empty() {
+            let mut tcp_cands = Vec::new();
+            let mut quic_cands = Vec::new();
+            for c in novel_candidates {
+                if c.is_quic_udp {
+                    quic_cands.push(c);
+                } else {
+                    tcp_cands.push(c);
+                }
+            }
+            let eps: Vec<SocketAddr> = tcp_cands
+                .iter()
+                .flat_map(|c| c.resolved_addrs.iter().take(2).copied())
+                .collect();
+            let outcomes = run_tcp_prefilter_endpoints(
+                eps,
+                1000,
+                TCP_MAX_CONCURRENT,
+                TCP_RATE_INTERVAL_MS,
+                Duration::from_secs(12),
+            )
+            .await;
+            let passed: Vec<CandidateNode> = tcp_cands
+                .into_iter()
+                .filter(|c| {
+                    c.resolved_addrs
+                        .iter()
+                        .take(2)
+                        .any(|ep| outcomes.get(ep) == Some(&TcpOutcome::Ok))
+                })
+                .collect();
+            let ordered = prioritize_l7_ready_proxies(passed, quic_cands);
+            if !ordered.is_empty() {
+                run_bg_l7_chunks(
+                    &bg_state,
+                    &bg_cache_path,
+                    mode,
+                    my_gen,
+                    auto_connect,
+                    bg_started,
+                    &ordered,
+                    &mut extra,
+                    &mut seen_eps,
+                    &mut metrics_by_key,
+                    &mut cur_active_score,
+                    &mut cur_active_is_quic,
+                    &mut last_published_len,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Фаза 3: если всё ещё < 20 серверов — догружаем ВСЕ источники (wait_all=true) и проверяем новые
+    if current_mode_generation(mode) == my_gen
+        && extra.len() < BACKGROUND_BACKUP_TARGET
+        && bg_started.elapsed() < Duration::from_secs(BACKGROUND_REFILL_BUDGET_SECS)
+    {
+        let bg_now = chrono::Utc::now().timestamp();
+        let mut bg_cache = load_disk_cache(&bg_cache_path).await;
+        let (all_raw, _, _) =
+            fetch_sources_or_cache_with(&bg_state, &bg_cfg, mode, &mut bg_cache, true).await;
+        let (deduped_raw, _) = deduplicate_proxies(all_raw);
+        let novel_proxies: Vec<Value> = deduped_raw
+            .into_iter()
+            .filter(|p| {
+                let n = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if is_node_blacklisted(bg_cache.mode_ref(mode), p, n, bg_now) {
+                    return false;
+                }
+                endpoint_blacklist_key(p)
+                    .map(|ep| !seen_eps.contains(&ep))
+                    .unwrap_or(true)
+            })
+            .collect();
+        let novel_proxies = diversify_by_endpoint(novel_proxies, MAX_PER_ENDPOINT_IN_POOL);
+        if !novel_proxies.is_empty() && current_mode_generation(mode) == my_gen {
+            let dns_futs = stream::iter(novel_proxies.into_iter().map(|proxy| async move {
+                let server = proxy.get("server").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let port = proxy.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let name = proxy.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let res = resolve_and_validate_host(&server, port).await;
+                (proxy, name, server, port, res)
+            }))
+            .buffer_unordered(16);
+            let mut tcp_cands = Vec::new();
+            let mut quic_cands = Vec::new();
+            for (proxy, name, server, port, res) in dns_futs.collect::<Vec<_>>().await {
+                if let Ok(addrs) = res {
+                    let subnet_key = addrs
+                        .first()
+                        .map(|a| subnet_prefix_key(a.ip()))
+                        .unwrap_or_else(|| "unknown".into());
+                    let cand = CandidateNode {
+                        is_quic_udp: is_quic_udp_node(&proxy),
+                        ru_sni_score: ru_sni_priority(&proxy),
+                        proxy,
+                        name,
+                        server,
+                        port,
+                        resolved_addrs: addrs,
+                        subnet_key,
+                    };
+                    if cand.is_quic_udp {
+                        quic_cands.push(cand);
+                    } else {
+                        tcp_cands.push(cand);
+                    }
+                }
+            }
+            let eps: Vec<SocketAddr> = tcp_cands
+                .iter()
+                .flat_map(|c| c.resolved_addrs.iter().take(2).copied())
+                .collect();
+            let outcomes = run_tcp_prefilter_endpoints(
+                eps,
+                1000,
+                TCP_MAX_CONCURRENT,
+                TCP_RATE_INTERVAL_MS,
+                Duration::from_secs(12),
+            )
+            .await;
+            let passed: Vec<CandidateNode> = tcp_cands
+                .into_iter()
+                .filter(|c| {
+                    c.resolved_addrs
+                        .iter()
+                        .take(2)
+                        .any(|ep| outcomes.get(ep) == Some(&TcpOutcome::Ok))
+                })
+                .collect();
+            let ordered = prioritize_l7_ready_proxies(passed, quic_cands);
+            if !ordered.is_empty() {
+                run_bg_l7_chunks(
+                    &bg_state,
+                    &bg_cache_path,
+                    mode,
+                    my_gen,
+                    auto_connect,
+                    bg_started,
+                    &ordered,
+                    &mut extra,
+                    &mut seen_eps,
+                    &mut metrics_by_key,
+                    &mut cur_active_score,
+                    &mut cur_active_is_quic,
+                    &mut last_published_len,
+                )
+                .await;
+            }
+        }
+    }
+
+    log_i!(
+        "[FREE-SUB] Фоновый добор завершён: {}/{} уникальных рабочих узлов (mode={:?})",
+        extra.len(),
+        BACKGROUND_BACKUP_TARGET,
+        mode
+    );
+}
+
+/// Добавить обе виртуальные подписки (`free_vpn` и `free_wl`) и служебный `__free_sub_probe` в config.yaml в 1 клик.
 pub async fn enable_both_free_subs(state: &AppState) -> Result<(), String> {
     let cfg = state.config.read().await.clone();
     let prov_dir = providers_dir(&cfg);
@@ -2510,10 +3262,29 @@ pub async fn enable_both_free_subs(state: &AppState) -> Result<(), String> {
             .await;
         }
     }
+    let probe_path = prov_dir.join(format!("{FREE_SUB_PROBE_PROVIDER_ID}.yaml"));
+    if !probe_path.exists() {
+        let placeholder = "proxies:\n  - name: \"__probe_placeholder\"\n    type: direct\n";
+        let _ = crate::api::servers::subscriptions::write_mobile_provider_yaml_atomic(
+            &probe_path,
+            placeholder,
+        )
+        .await;
+    }
 
     let mut tx = ConfigTx::begin(state).await?;
     let mut y = tx.read_yaml().await?;
     let existing = crate::routing::parse_provider_names(&y);
+    if !existing
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(FREE_SUB_PROBE_PROVIDER_ID))
+    {
+        y = crate::routing::add_service_file_provider_to_yaml(
+            &y,
+            FREE_SUB_PROBE_PROVIDER_ID,
+            &format!("./providers/{FREE_SUB_PROBE_PROVIDER_ID}.yaml"),
+        )?;
+    }
     for mode in [FreeSubMode::Vpn, FreeSubMode::Whitelist] {
         let pid = mode.provider_id();
         if !existing.iter().any(|p| p.eq_ignore_ascii_case(pid)) {
@@ -2602,12 +3373,10 @@ pub async fn disconnect_free_sub(state: &AppState, mode: FreeSubMode) -> Result<
         let _ = sync_mode_whitelist_state(state, FreeSubMode::Vpn, None).await;
     }
 
-    update_status(|st| {
-        if st.mode == mode {
-            st.active_node = None;
-            st.stage = FreeSubStage::Idle;
-            st.stage_label = format!("Отключено (возврат на {fallback_used})");
-        }
+    update_status(mode, |st| {
+        st.active_node = None;
+        st.stage = FreeSubStage::Idle;
+        st.stage_label = format!("Отключено (возврат на {fallback_used})");
     })
     .await;
 
@@ -2661,13 +3430,80 @@ pub async fn remove_free_sub(state: &AppState, mode: FreeSubMode) -> Result<(), 
     Ok(())
 }
 
-/// Переключение узла внутри пула (`next`, `prev`, либо конкретное имя узла).
+/// Проверяет, является ли сейчас указанный режим (`free_vpn` / `free_wl`) активным сервером в Mihomo.
+pub async fn is_mode_active(state: &AppState, mode: FreeSubMode) -> bool {
+    let pid = mode.provider_id();
+    let cfg = state.config.read().await.clone();
+    let prov_path = providers_dir(&cfg).join(format!("{pid}.yaml"));
+    let raw = tokio::fs::read_to_string(&prov_path).await.unwrap_or_default();
+    let nodes = parse_existing_provider_nodes(&raw);
+    let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
+    active_srv.as_ref().is_some_and(|s| {
+        s.provider.as_deref() == Some(pid)
+            || s.id == pid
+            || nodes
+                .iter()
+                .any(|n| n.get("name").and_then(|v| v.as_str()) == Some(s.id.as_str()))
+    })
+}
+
+/// Подключает первый доступный узел пула (или `last_selected_node`) при клике по неактивной карточке.
+pub async fn connect_pool_node(state: &AppState, mode: FreeSubMode) -> Result<String, String> {
+    switch_pool_node_internal(state, mode, "connect", true).await
+}
+
+/// Переключение узла внутри пула (`next`, `prev`, `connect`, либо конкретное имя узла).
 pub async fn switch_pool_node(
     state: &AppState,
     mode: FreeSubMode,
     target: &str,
 ) -> Result<String, String> {
     switch_pool_node_internal(state, mode, target, true).await
+}
+
+/// Умный выбор лучшего следующего узла при аварийном/ручном бане:
+/// предпочитает узлы с `alive == true` в провайдере Mihomo, затем TCP над QUIC/UDP и минимальный `quality_score`.
+pub fn select_best_next_pool_node(
+    names: &[String],
+    nodes: &[Value],
+    mc: &ModeCache,
+    cur_name: Option<&str>,
+    provider_proxies: Option<&std::collections::BTreeMap<String, Value>>,
+) -> Option<String> {
+    let mut best: Option<((u8, u8, i64, usize), String)> = None;
+    for (idx, nm) in names.iter().enumerate() {
+        if cur_name.is_some_and(|c| c == nm) {
+            continue;
+        }
+        let node_val = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(nm.as_str()));
+        let alive_tier = match provider_proxies.and_then(|m| m.get(nm)).and_then(|v| v.get("alive")).and_then(|a| a.as_bool()) {
+            Some(true) => 0u8,
+            None => 1u8,
+            Some(false) => 2u8,
+        };
+        let is_quic = if node_val.is_some_and(is_quic_udp_node) { 1u8 } else { 0u8 };
+        let dk = node_val.map(node_dedup_key);
+        let ep = node_val.and_then(endpoint_blacklist_key);
+        let score = mc
+            .working_nodes
+            .iter()
+            .find(|w| {
+                w.proxy.get("name").and_then(|v| v.as_str()) == Some(nm.as_str())
+                    || dk.as_ref().is_some_and(|d| &node_dedup_key(&w.proxy) == d)
+                    || ep.as_ref().is_some_and(|e| endpoint_blacklist_key(&w.proxy).as_ref() == Some(e))
+            })
+            .map(CachedWorkingNode::effective_quality_score)
+            .filter(|&s| s > 0)
+            .unwrap_or(i64::MAX / 2);
+
+        let key = (alive_tier, is_quic, score, idx);
+        if best.as_ref().is_none_or(|(bk, _)| key < *bk) {
+            best = Some((key, nm.clone()));
+        }
+    }
+    best.map(|(_, nm)| nm)
 }
 
 async fn switch_pool_node_internal(
@@ -2717,24 +3553,105 @@ async fn switch_pool_node_internal(
         });
 
     let chosen = match target.trim() {
+        "connect" => {
+            if let Some(ref last) = cache.mode_ref(mode).last_selected_node {
+                if names.iter().any(|n| n == last) {
+                    last.clone()
+                } else {
+                    names[0].clone()
+                }
+            } else {
+                names[0].clone()
+            }
+        }
+        "best_next" => {
+            let prov_proxies = mihomo::get_provider_proxies(&state.http, &cfg).await.ok();
+            match select_best_next_pool_node(
+                &names,
+                &nodes,
+                cache.mode_ref(mode),
+                cur_name.as_deref(),
+                prov_proxies.as_ref(),
+            ) {
+                Some(picked) => picked,
+                None => {
+                    if !get_status_for(mode).await.running {
+                        let _ = spawn_background_refill(state.clone(), mode).await;
+                    }
+                    return Err("В пуле нет другого рабочего узла кроме текущего — запущен добор свежих узлов".into());
+                }
+            }
+        }
         "next" => {
-            let idx = cur_name
+            let others_exist = match cur_name.as_deref() {
+                Some(cur) => names.iter().any(|n| n != cur),
+                None => !names.is_empty(),
+            };
+            if !others_exist {
+                if !get_status_for(mode).await.running {
+                    let _ = spawn_background_refill(state.clone(), mode).await;
+                }
+                return Err("В пуле нет другого рабочего узла кроме текущего — запущен добор свежих узлов".into());
+            }
+            let start_idx = cur_name
                 .as_ref()
                 .and_then(|c| names.iter().position(|n| n == c))
                 .map(|i| (i + 1) % names.len())
                 .unwrap_or(0);
-            names[idx].clone()
+            let mut picked = names[start_idx].clone();
+            if cur_name.as_deref() == Some(picked.as_str()) {
+                if let Some(alt) = names.iter().find(|n| Some(n.as_str()) != cur_name.as_deref()) {
+                    picked = alt.clone();
+                } else {
+                    if !get_status_for(mode).await.running {
+                        let _ = spawn_background_refill(state.clone(), mode).await;
+                    }
+                    return Err("В пуле нет другого рабочего узла кроме текущего — запущен добор свежих узлов".into());
+                }
+            }
+            picked
         }
         "prev" => {
-            let idx = cur_name
+            let others_exist = match cur_name.as_deref() {
+                Some(cur) => names.iter().any(|n| n != cur),
+                None => !names.is_empty(),
+            };
+            if !others_exist {
+                if !get_status_for(mode).await.running {
+                    let _ = spawn_background_refill(state.clone(), mode).await;
+                }
+                return Err("В пуле нет другого рабочего узла кроме текущего — запущен добор свежих узлов".into());
+            }
+            let start_idx = cur_name
                 .as_ref()
                 .and_then(|c| names.iter().position(|n| n == c))
                 .map(|i| if i == 0 { names.len() - 1 } else { i - 1 })
                 .unwrap_or(0);
-            names[idx].clone()
+            let mut picked = names[start_idx].clone();
+            if cur_name.as_deref() == Some(picked.as_str()) {
+                if let Some(alt) = names.iter().rev().find(|n| Some(n.as_str()) != cur_name.as_deref()) {
+                    picked = alt.clone();
+                } else {
+                    if !get_status_for(mode).await.running {
+                        let _ = spawn_background_refill(state.clone(), mode).await;
+                    }
+                    return Err("В пуле нет другого рабочего узла кроме текущего — запущен добор свежих узлов".into());
+                }
+            }
+            picked
         }
         explicit => {
             if names.iter().any(|n| n == explicit) {
+                explicit.to_string()
+            } else if let Some(raw_node) = nodes
+                .iter()
+                .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(explicit))
+            {
+                // Ручное «Подключить снова» из истории: снимаем узел из ЧС по явному выбору пользователя
+                let _ = update_disk_cache(&cp, |c| {
+                    unblacklist_node_in_cache(c.mode_mut(mode), Some(raw_node), explicit);
+                })
+                .await;
                 explicit.to_string()
             } else {
                 return Err(format!("Узел '{explicit}' не найден в активном пуле {pid}"));
@@ -2774,8 +3691,7 @@ async fn switch_pool_node_internal(
         let _ = sync_mode_whitelist_state(state, mode, Some(&chosen)).await;
     }
     record_session_start(state, mode, &nodes, &chosen).await;
-    update_status(|st| {
-        st.mode = mode;
+    update_status(mode, |st| {
         st.stage = FreeSubStage::Connected;
         st.active_node = Some(chosen.clone());
         st.stage_label = format!("Подключено ({chosen})");
@@ -2784,36 +3700,102 @@ async fn switch_pool_node_internal(
     Ok(chosen)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlacklistNextResult {
+    pub active_node: Option<String>,
+    pub refill_started: bool,
+    pub message: String,
+}
+
 /// Добавить текущий (или указанный) узел в чёрный список на 24ч и переключиться на следующий.
+/// Если пул исчерпан — автоматически запускает автоподбор нового рабочего узла (с авто-амнистией при необходимости).
 pub async fn blacklist_and_next(
     state: &AppState,
     mode: FreeSubMode,
     node_name: Option<&str>,
-) -> Result<String, String> {
+) -> Result<BlacklistNextResult, String> {
+    blacklist_and_next_with_ttl(state, mode, node_name, BLACKLIST_TTL_SECS).await
+}
+
+pub async fn blacklist_and_next_with_ttl(
+    state: &AppState,
+    mode: FreeSubMode,
+    node_name: Option<&str>,
+    ttl_secs: i64,
+) -> Result<BlacklistNextResult, String> {
     let cfg = state.config.read().await.clone();
     let prov_path = providers_dir(&cfg).join(format!("{}.yaml", mode.provider_id()));
     let raw = tokio::fs::read_to_string(&prov_path).await.unwrap_or_default();
     let nodes = parse_existing_provider_nodes(&raw);
 
+    let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
+    let resolved_leaf = resolve_pool_leaf_name(state, &cfg, mode, active_srv.as_ref(), &nodes).await;
+
     let cp = cache_file_path(&state.config_path);
-    let mut cache = load_disk_cache(&cp).await;
     let now_ts = chrono::Utc::now().timestamp();
 
-    let target_name = node_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| cache.mode_ref(mode).last_selected_node.clone())
-        .or_else(|| nodes.first().and_then(|n| n.get("name").and_then(|v| v.as_str())).map(str::to_string))
-        .ok_or_else(|| "Не определён узел для добавления в чёрный список".to_string())?;
+    let target_name = {
+        let pre_cache = load_disk_cache(&cp).await;
+        node_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or(resolved_leaf)
+            .or_else(|| pre_cache.mode_ref(mode).last_selected_node.clone())
+            .or_else(|| nodes.first().and_then(|n| n.get("name").and_then(|v| v.as_str())).map(str::to_string))
+            .ok_or_else(|| "Не определён узел для добавления в чёрный список".to_string())?
+    };
 
     let proxy_opt = nodes
         .iter()
         .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(target_name.as_str()));
-    blacklist_node_in_cache(cache.mode_mut(mode), proxy_opt, &target_name, now_ts);
-    let _ = save_disk_cache(&cp, &cache).await;
+    update_disk_cache(&cp, |cache| {
+        blacklist_node_in_cache_ttl(cache.mode_mut(mode), proxy_opt, &target_name, now_ts, ttl_secs);
+    })
+    .await?;
 
-    switch_pool_node(state, mode, "next").await
+    match switch_pool_node_internal(state, mode, "best_next", ttl_secs >= BLACKLIST_TTL_SECS).await {
+        Ok(next) => Ok(BlacklistNextResult {
+            active_node: Some(next.clone()),
+            refill_started: false,
+            message: format!("Узел '{target_name}' добавлен в ЧС, активен: {next}"),
+        }),
+        Err(_) => {
+            let started = match spawn_one_click_connect(state.clone(), mode).await {
+                Ok(_) => true,
+                Err(_) => get_status_for(mode).await.running,
+            };
+            Ok(BlacklistNextResult {
+                active_node: None,
+                refill_started: started,
+                message: format!(
+                    "Узел '{target_name}' добавлен в ЧС — пул исчерпан, запущен автоподбор нового рабочего узла…"
+                ),
+            })
+        }
+    }
+}
+
+/// Полный сброс runtime-состояния, фоновых задач и дискового кэша `free_sub` (используется при POST /api/settings/reset).
+pub async fn reset_free_sub_runtime_and_cache(state: &AppState) {
+    bump_mode_generation(FreeSubMode::Vpn);
+    bump_mode_generation(FreeSubMode::Whitelist);
+    *FREE_VPN_STATUS.write().await = FreeSubStatus {
+        mode: FreeSubMode::Vpn,
+        ..Default::default()
+    };
+    *FREE_WL_STATUS.write().await = FreeSubStatus {
+        mode: FreeSubMode::Whitelist,
+        ..Default::default()
+    };
+    *ACTIVE_SESSION_TRAFFIC_BASE.lock().await = None;
+    *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
+    *IDLE_PROBE_TICKS.lock().await = (None, 0);
+    LAST_AUTO_UPGRADE_TS.lock().await.clear();
+
+    let cp = cache_file_path(&state.config_path);
+    let _cg = FREE_SUB_CACHE_LOCK.lock().await;
+    let _ = tokio::fs::remove_file(&cp).await;
 }
 
 /// Разрешает имя реального листового узла для виртуального пула бесплатной подписки (`free_wl`/`free_vpn`).
@@ -2883,6 +3865,26 @@ pub async fn get_pool_and_history(state: &AppState, mode: FreeSubMode) -> Value 
     let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
     let active_leaf = resolve_pool_leaf_name(state, &cfg, mode, active_srv.as_ref(), &nodes).await;
 
+    let disk_delays_by_name: HashMap<String, i64> = cache
+        .mode_ref(mode)
+        .working_nodes
+        .iter()
+        .filter(|w| w.last_delay_ms > 0)
+        .filter_map(|w| {
+            w.proxy
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|nm| (nm.to_string(), w.last_delay_ms))
+        })
+        .collect();
+    let disk_delays_by_ep: HashMap<String, i64> = cache
+        .mode_ref(mode)
+        .working_nodes
+        .iter()
+        .filter(|w| w.last_delay_ms > 0)
+        .filter_map(|w| endpoint_blacklist_key(&w.proxy).map(|ep| (ep, w.last_delay_ms)))
+        .collect();
+
     let available: Vec<Value> = nodes
         .iter()
         .filter(|n| {
@@ -2891,11 +3893,18 @@ pub async fn get_pool_and_history(state: &AppState, mode: FreeSubMode) -> Value 
         })
         .map(|n| {
             let nm = n.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let ping_ms = mihomo::cached_ping(nm)
+                .filter(|&d| d > 0)
+                .or_else(|| disk_delays_by_name.get(nm).copied())
+                .or_else(|| {
+                    endpoint_blacklist_key(n).and_then(|ep| disk_delays_by_ep.get(&ep).copied())
+                })
+                .unwrap_or(-1);
             json!({
                 "name": nm,
                 "host": n.get("server").and_then(|v| v.as_str()).unwrap_or(""),
                 "port": n.get("port").and_then(|v| v.as_u64()).unwrap_or(0),
-                "ping_ms": mihomo::cached_ping(nm).unwrap_or(-1),
+                "ping_ms": ping_ms,
                 "is_active": active_leaf.as_deref() == Some(nm),
             })
         })
@@ -2939,6 +3948,9 @@ static IDLE_PROBE_TICKS: std::sync::LazyLock<Mutex<(Option<String>, u8)>> =
     std::sync::LazyLock::new(|| Mutex::new((None, 0)));
 static REFILL_CHECK_TICKS: std::sync::LazyLock<Mutex<u8>> =
     std::sync::LazyLock::new(|| Mutex::new(0));
+static LAST_AUTO_UPGRADE_TS: std::sync::LazyLock<Mutex<HashMap<String, i64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+const AUTO_UPGRADE_COOLDOWN_SECS: i64 = 600;
 
 /// Определяет, является ли текущий тик Smart Watchdog подозрительным на зависание:
 /// узел пропал из живых в провайдере ИЛИ при активных соединениях клиент шлёт трафик (up > 0),
@@ -2953,6 +3965,8 @@ pub fn is_stall_watchdog_tick(
 }
 
 /// Подбирает лучший узел в пуле для авто-апгрейда медленного или QUIC/UDP активного узла.
+/// Никогда не подставляет выдуманную задержку — использует только реальный замер из `PING_CACHE`
+/// или `mc.working_nodes.last_delay_ms`.
 pub fn pick_faster_pool_candidate(
     nodes: &[Value],
     mc: &ModeCache,
@@ -2969,19 +3983,25 @@ pub fn pick_faster_pool_candidate(
             continue;
         }
         let cand_is_quic = is_quic_udp_node(n);
-        let cand_ping = cached_ping_fn(nm).unwrap_or(0);
-        // Если пинг кандидата не закэширован, но активный узел зашейпленный QUIC/UDP или > 1500 мс,
-        // предпочитаем TCP-кандидата из пула (они уже отсортированы по лучшему L7 скору при публикации).
-        let effective_cand_delay = if cand_ping > 0 {
-            cand_ping
-        } else if (active_is_quic || active_score >= 1500) && !cand_is_quic {
-            450
-        } else {
+        let dk = node_dedup_key(n);
+        let ep = endpoint_blacklist_key(n);
+        let matched_w = mc.working_nodes.iter().find(|w| {
+            w.proxy.get("name").and_then(|v| v.as_str()) == Some(nm)
+                || node_dedup_key(&w.proxy) == dk
+                || (ep.is_some() && endpoint_blacklist_key(&w.proxy) == ep)
+        });
+        let cand_score = matched_w
+            .map(|w| w.quality_score)
+            .filter(|&q| q > 0)
+            .or_else(|| cached_ping_fn(nm).filter(|&d| d > 0))
+            .or_else(|| matched_w.map(|w| w.last_delay_ms).filter(|&d| d > 0))
+            .unwrap_or(0);
+        if cand_score <= 0 {
             continue;
-        };
-        if should_upgrade_active_node(active_score, active_is_quic, effective_cand_delay, cand_is_quic) {
-            if best.as_ref().is_none_or(|(_, b)| effective_cand_delay < *b) {
-                best = Some((nm.to_string(), effective_cand_delay));
+        }
+        if should_upgrade_active_node(active_score, active_is_quic, cand_score, cand_is_quic) {
+            if best.as_ref().is_none_or(|(_, b)| cand_score < *b) {
+                best = Some((nm.to_string(), cand_score));
             }
         }
     }
@@ -2989,7 +4009,7 @@ pub fn pick_faster_pool_candidate(
 }
 
 async fn ensure_pool_backup_refill(state: &AppState, mode: FreeSubMode, cfg: &AppConfig) {
-    if get_status().await.running {
+    if get_status_for(mode).await.running {
         return;
     }
     let prov_path = providers_dir(cfg).join(format!("{}.yaml", mode.provider_id()));
@@ -3011,8 +4031,11 @@ async fn ensure_pool_backup_refill(state: &AppState, mode: FreeSubMode, cfg: &Ap
     };
     if avail_count < 3 {
         if avail_count <= 1 && bl_count >= 15 {
-            log_i!("[FREE-SUB] Smart Watchdog: в пуле {avail_count} узлов и {bl_count} в blacklist — сбрасываем чёрный список перед авто-добором");
-            let _ = update_disk_cache(&cp, |c| c.mode_mut(mode).blacklist.clear()).await;
+            log_i!("[FREE-SUB] Smart Watchdog: в пуле {avail_count} узлов и {bl_count} в blacklist — градуальная амнистия перед авто-добором");
+            let _ = update_disk_cache(&cp, |c| {
+                amnesty_blacklist_gradual(c.mode_mut(mode), now_ts);
+            })
+            .await;
         }
         let bg_state = state.clone();
         tokio::spawn(async move {
@@ -3029,7 +4052,7 @@ async fn ensure_pool_backup_refill(state: &AppState, mode: FreeSubMode, cfg: &Ap
 /// Также при работе на медленном/QUIC узле автоматически переключается на более быстрый TCP-узел из пула
 /// и поддерживает минимальный запас узлов в фоне.
 pub async fn check_free_sub_stall_watchdog(state: &AppState) {
-    let cfg = state.config.read().await.clone();
+    let cfg = state.cfg_snapshot().await;
     let Ok(Some(active)) = mihomo::get_active_server(&state.http, &cfg).await else {
         return;
     };
@@ -3042,6 +4065,10 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
             return;
         }
     };
+    // Не мешаем активному поиску/подключению или фоновому добору этого же режима
+    if get_status_for(mode).await.running {
+        return;
+    }
 
     let (leaf_name, alive_in_provider) =
         match mihomo::resolve_virtual_pool_active_leaf(&state.http, &cfg, mode.provider_id()).await {
@@ -3099,7 +4126,7 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
             *idle = (Some(leaf_name.clone()), 0);
         }
         idle.1 = idle.1.saturating_add(1);
-        if idle.1 >= 6 {
+        if idle.1 >= 24 {
             idle.1 = 0;
             periodic_probe_due = true;
         }
@@ -3117,7 +4144,7 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
 
     if count >= 3 || periodic_probe_due {
         // Активная L7-проверка реального листового узла (включая доступ к youtube.com) перед признанием обрыва
-        let mut l7_res = mihomo::probe_service_provider_node_l7_scored(
+        let mut l7_res = mihomo::probe_service_provider_node_l7_metrics(
             &state.http,
             &cfg,
             mode.provider_id(),
@@ -3126,18 +4153,28 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
         )
         .await;
         if l7_res.is_err() && count < 3 {
-            // Защита от ложного бана при единичном скачке под нагрузкой (плановая проверка): 1 повтор через 1.5с
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            l7_res = mihomo::probe_service_provider_node_l7_scored(
-                &state.http,
-                &cfg,
-                mode.provider_id(),
-                &leaf_name,
-                L7_TIMEOUT_MS,
-            )
-            .await;
+            // Защита от ложного бана при единичном скачке под нагрузкой (плановая проверка): 2 повтора с паузой 2с
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                l7_res = mihomo::probe_service_provider_node_l7_metrics(
+                    &state.http,
+                    &cfg,
+                    mode.provider_id(),
+                    &leaf_name,
+                    L7_TIMEOUT_MS,
+                )
+                .await;
+                if l7_res.is_ok() {
+                    break;
+                }
+            }
         }
-        if let Ok(active_score) = l7_res {
+        if let Ok(active_metrics) = l7_res {
+            let mut ping_map = std::collections::BTreeMap::new();
+            ping_map.insert(leaf_name.clone(), active_metrics.rtt_ms);
+            mihomo::store_ping_cache(&ping_map);
+            let active_score = active_metrics.quality_score;
+
             *STALL_WATCHDOG_STREAK.lock().await = (Some(leaf_name.clone()), 0);
             *IDLE_PROBE_TICKS.lock().await = (Some(leaf_name.clone()), 0);
 
@@ -3153,24 +4190,36 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
                 let cp = cache_file_path(&state.config_path);
                 let cache = load_disk_cache(&cp).await;
                 let now_ts = chrono::Utc::now().timestamp();
-                if let Some((cand_name, cand_ms)) = pick_faster_pool_candidate(
-                    &nodes,
-                    cache.mode_ref(mode),
-                    &leaf_name,
-                    active_score,
-                    active_is_quic,
-                    now_ts,
-                    mihomo::cached_ping,
-                ) {
-                    log_i!(
-                        "[FREE-SUB] Smart Watchdog: авто-апгрейд с медленного/QUIC узла '{}' (score={} мс) на '{}' ({} мс)",
-                        leaf_name,
+                let upgrade_cooldown_ok = {
+                    let guard = LAST_AUTO_UPGRADE_TS.lock().await;
+                    guard
+                        .get(mode.provider_id())
+                        .is_none_or(|&ts| now_ts.saturating_sub(ts) >= AUTO_UPGRADE_COOLDOWN_SECS)
+                };
+                if upgrade_cooldown_ok && !is_recent_manual_pool_switch(120) {
+                    if let Some((cand_name, cand_ms)) = pick_faster_pool_candidate(
+                        &nodes,
+                        cache.mode_ref(mode),
+                        &leaf_name,
                         active_score,
-                        cand_name,
-                        cand_ms
-                    );
-                    if switch_pool_node_internal(state, mode, &cand_name, false).await.is_ok() {
-                        return;
+                        active_is_quic,
+                        now_ts,
+                        mihomo::cached_ping,
+                    ) {
+                        log_i!(
+                            "[FREE-SUB] Smart Watchdog: авто-апгрейд с медленного/QUIC узла '{}' (score={} мс) на '{}' ({} мс)",
+                            leaf_name,
+                            active_score,
+                            cand_name,
+                            cand_ms
+                        );
+                        if switch_pool_node_internal(state, mode, &cand_name, false).await.is_ok() {
+                            LAST_AUTO_UPGRADE_TS
+                                .lock()
+                                .await
+                                .insert(mode.provider_id().to_string(), now_ts);
+                            return;
+                        }
                     }
                 }
             }
@@ -3225,16 +4274,26 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
             count * 5,
             node_conns
         );
-        if let Err(err) = blacklist_and_next(state, mode, Some(&leaf_name)).await {
-            log_w!(
-                "[FREE-SUB] Smart Watchdog: пул {:?} исчерпан ({err}) — очищаем blacklist и запускаем переподбор",
-                mode
-            );
-            let _ = update_disk_cache(&cp, |c| c.mode_mut(mode).blacklist.clear()).await;
-            let bg_state = state.clone();
-            tokio::spawn(async move {
-                let _ = start_one_click_connect(bg_state, mode).await;
-            });
+        match blacklist_and_next_with_ttl(state, mode, Some(&leaf_name), WATCHDOG_BLACKLIST_TTL_SECS).await {
+            Ok(res) if res.refill_started => {
+                log_w!(
+                    "[FREE-SUB] Smart Watchdog: пул {:?} исчерпан — запущен автоподбор нового узла",
+                    mode
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                log_w!(
+                    "[FREE-SUB] Smart Watchdog: ошибка переключения после бана ({err}) — градуальная амнистия blacklist и запуск переподбора",
+                    err = err
+                );
+                let now_err_ts = chrono::Utc::now().timestamp();
+                let _ = update_disk_cache(&cp, |c| {
+                    amnesty_blacklist_gradual(c.mode_mut(mode), now_err_ts);
+                })
+                .await;
+                let _ = spawn_one_click_connect(state.clone(), mode).await;
+            }
         }
     } else if refill_due {
         ensure_pool_backup_refill(state, mode, &cfg).await;
@@ -3531,6 +4590,7 @@ mod tests {
             proxy: n1.clone(),
             last_ok_ts: 100,
             last_delay_ms: 250,
+            quality_score: 0,
             mode: FreeSubMode::Whitelist,
             high_priority: false,
             total_bytes: 0,
@@ -3539,6 +4599,7 @@ mod tests {
             proxy: n2.clone(),
             last_ok_ts: 100,
             last_delay_ms: 80,
+            quality_score: 0,
             mode: FreeSubMode::Whitelist,
             high_priority: false,
             total_bytes: 0,
@@ -3683,15 +4744,15 @@ mod tests {
     #[test]
     fn regression_bg_refill_publishes_incrementally_inside_batch_loop() {
         let src = include_str!("mod.rs");
-        let marker = "async fn run_background_l7_refill(";
-        let start = src.find(marker).expect("run_background_l7_refill fn");
+        let marker = "async fn run_bg_l7_chunks(";
+        let start = src.find(marker).expect("run_bg_l7_chunks fn");
         let end = src[start..]
             .find("pub async fn enable_both_free_subs")
             .map(|o| start + o)
             .unwrap_or(src.len());
         let block = &src[start..end];
-        let loop_pos = block.find("for chunk in remaining_for_bg.chunks").expect("batch loop");
-        let pub_pos = block.find("publish_and_connect(&bg_state, mode, extra.clone()").expect("publish_and_connect");
+        let loop_pos = block.find("for chunk in proxies.chunks").expect("batch loop");
+        let pub_pos = block.find("publish_and_connect(bg_state, mode, extra.clone()").expect("publish_and_connect");
         assert!(pub_pos > loop_pos && block.contains("last_published_len"), "publish_and_connect должен вызываться инкрементально внутри цикла батчей");
     }
 
@@ -3751,6 +4812,8 @@ mod tests {
     async fn regression_stall_watchdog_resolves_virtual_pool_leaf_blacklists_and_switches() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
 
         crate::mihomo::invalidate_proxies_cache();
         *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
@@ -3875,6 +4938,14 @@ mod tests {
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
         };
+
+        // Сбрасываем глобальное состояние статуса на случай параллельных тестов free_sub
+        *FREE_WL_STATUS.write().await = FreeSubStatus {
+            mode: FreeSubMode::Whitelist,
+            ..Default::default()
+        };
+        *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
+        *IDLE_PROBE_TICKS.lock().await = (None, 0);
 
         // 3 тика при alive == false в провайдере Mihomo
         for _ in 0..3 {
@@ -4255,5 +5326,770 @@ proxies:
             },
         );
         assert_eq!(picked, Some(("fast-vless".to_string(), 280)));
+    }
+
+    #[tokio::test]
+    async fn regression_switch_pool_node_never_switches_to_same_node_or_writes_fake_history() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
+
+        let dir = std::env::temp_dir().join(format!("xkeen_no_self_switch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+        let pool_yaml = proxies_to_mihomo_yaml(&[
+            json!({"name": "only-node", "type": "vless", "server": "1.1.1.1", "port": 443, "uuid": "u1"}),
+        ])
+        .unwrap();
+        std::fs::write(prov_dir.join("free_wl.yaml"), pool_yaml).unwrap();
+
+        let put_calls = Arc::new(AtomicUsize::new(0));
+        let put_srv = put_calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv_handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let pc = put_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("PUT /proxies/") {
+                        pc.fetch_add(1, Ordering::SeqCst);
+                        ("204 No Content", String::new())
+                    } else if first_line.contains("GET /providers/proxies") {
+                        ("200 OK", json!({
+                            "providers": {
+                                "free_wl": {
+                                    "name": "free_wl",
+                                    "vehicleType": "File",
+                                    "proxies": [{ "name": "only-node", "type": "VLESS", "alive": true }]
+                                }
+                            }
+                        }).to_string())
+                    } else if first_line.contains("GET /proxies") {
+                        ("200 OK", json!({
+                            "proxies": {
+                                "PROXY": { "name": "PROXY", "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "only-node"] },
+                                "🛡️ Whitelist": { "name": "🛡️ Whitelist", "type": "Selector", "now": "only-node", "all": ["only-node"] },
+                                "only-node": { "name": "only-node", "type": "VLESS", "alive": true }
+                            }
+                        }).to_string())
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist_providers = vec!["free_wl".into()];
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        // Занимаем run-lock чтобы не запускать реальные сетевые источники в фоне
+        let _run_guard = run_lock(FreeSubMode::Whitelist).lock().await;
+        let res_next = switch_pool_node(&state, FreeSubMode::Whitelist, "next").await;
+        let res_prev = switch_pool_node(&state, FreeSubMode::Whitelist, "prev").await;
+        drop(_run_guard);
+        srv_handle.abort();
+
+        assert!(res_next.is_err(), "next при 1 узле должен возвращать ошибку, а не переключать на себя");
+        assert!(res_prev.is_err(), "prev при 1 узле должен возвращать ошибку, а не переключать на себя");
+        assert_eq!(put_calls.load(Ordering::SeqCst), 0, "PUT /proxies/ не должен вызываться при 1 узле");
+        let cache = load_disk_cache(&cache_file_path(&cfg_path)).await;
+        assert!(cache.mode_ref(FreeSubMode::Whitelist).sessions.is_empty(), "не должно создаваться фейковых записей в history");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::mihomo::invalidate_proxies_cache();
+    }
+
+    #[tokio::test]
+    async fn regression_blacklist_and_next_last_node_triggers_refill_and_never_preserves_banned() {
+        let dir = std::env::temp_dir().join(format!("xkeen_bl_last_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+
+        let banned_node = json!({"name": "banned-leaf", "type": "vless", "server": "1.2.3.4", "port": 443, "uuid": "u1"});
+        let fresh_node = json!({"name": "fresh-leaf", "type": "vless", "server": "5.6.7.8", "port": 443, "uuid": "u2"});
+        std::fs::write(
+            prov_dir.join("free_wl.yaml"),
+            proxies_to_mihomo_yaml(&[banned_node.clone()]).unwrap(),
+        )
+        .unwrap();
+
+        let mut mc = ModeCache::default();
+        let now_ts = chrono::Utc::now().timestamp();
+        blacklist_node_in_cache(&mut mc, Some(&banned_node), "banned-leaf", now_ts);
+        let (merged, preserved) = merge_verified_with_active_session_checked(
+            vec![fresh_node.clone()],
+            &[banned_node.clone()],
+            Some("banned-leaf"),
+            &mc,
+            now_ts + 5,
+        );
+        assert!(!preserved, "забаненный активный узел не должен сохраняться через preserved_active");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["name"], "fresh-leaf");
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.mihomo.port = 1; // unreachable mock port
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let res = blacklist_and_next(&state, FreeSubMode::Whitelist, Some("banned-leaf"))
+            .await
+            .expect("blacklist_and_next на последнем узле не должен падать");
+        assert_eq!(res.active_node, None);
+        assert!(res.refill_started, "при исчерпании пула должен автоматически запускаться подбор нового узла");
+        bump_mode_generation(FreeSubMode::Whitelist);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regression_l7_batch_probe_stop_after_first_returns_immediately() {
+        let nodes: Vec<Value> = (0..8)
+            .map(|i| json!({ "name": format!("n-{i}") }))
+            .collect();
+        let started = Instant::now();
+        let res = probe_l7_batch_with(nodes, 4, true, |node| async move {
+            let nm = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if nm == "n-0" {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                (node, Ok(15))
+            } else {
+                tokio::time::sleep(Duration::from_millis(4000)).await;
+                (node, Err("timeout".into()))
+            }
+        })
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0["name"], "n-0");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "stop_after_first=true должен возвращаться сразу после первого рабочего узла, а не ждать 4000мс (elapsed={elapsed:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_enable_both_free_subs_creates_probe_provider_immediately() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = std::env::temp_dir().join(format!("xkeen_enable_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        let base_yaml = "mixed-port: 7892\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base_yaml).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        enable_both_free_subs(&state).await.expect("enable_both_free_subs ok");
+        srv.abort();
+
+        let updated_yaml = tokio::fs::read_to_string(&yaml_path).await.unwrap();
+        let names = crate::routing::parse_provider_names(&updated_yaml);
+        assert!(names.iter().any(|p| p == FREE_SUB_PROBE_PROVIDER_ID), "names={names:?}");
+        assert!(names.iter().any(|p| p == FREE_WL_PROVIDER_ID), "names={names:?}");
+        assert!(names.iter().any(|p| p == FREE_VPN_PROVIDER_ID), "names={names:?}");
+        assert!(dir.join("providers").join(format!("{FREE_SUB_PROBE_PROVIDER_ID}.yaml")).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regression_stall_watchdog_skips_while_job_is_running_and_uses_short_ttl() {
+        update_status(FreeSubMode::Whitelist, |st| {
+            st.running = true;
+        })
+        .await;
+        // Watchdog должен мгновенно выйти при running == true, не делая HTTP-запросов
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.port = 1;
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(std::env::temp_dir().join("xkeen_wd_skip.json")),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+        check_free_sub_stall_watchdog(&state).await;
+        update_status(FreeSubMode::Whitelist, |st| {
+            st.running = false;
+        })
+        .await;
+
+        let mut mc = ModeCache::default();
+        let node = json!({"name": "wd-node", "type": "vless", "server": "1.2.3.4", "port": 443, "uuid": "u1"});
+        let now = 1_700_000_000i64;
+        blacklist_node_in_cache_ttl(&mut mc, Some(&node), "wd-node", now, WATCHDOG_BLACKLIST_TTL_SECS);
+        assert!(is_node_blacklisted(&mc, &node, "wd-node", now + 300));
+        assert!(!is_node_blacklisted(&mc, &node, "wd-node", now + WATCHDOG_BLACKLIST_TTL_SECS + 1));
+    }
+
+    #[tokio::test]
+    async fn regression_explicit_switch_pool_node_unblacklists_manual_reconnect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
+
+        let dir = std::env::temp_dir().join(format!("xkeen_unblacklist_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+
+        let n_a = json!({"name": "node-a", "type": "vless", "server": "1.1.1.1", "port": 443, "uuid": "u1"});
+        let n_b = json!({"name": "node-b", "type": "vless", "server": "2.2.2.2", "port": 443, "uuid": "u2"});
+        std::fs::write(prov_dir.join("free_wl.yaml"), proxies_to_mihomo_yaml(&[n_a.clone(), n_b.clone()]).unwrap()).unwrap();
+
+        let cp = cache_file_path(&cfg_path);
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut cache = FreeSubCache::default();
+        blacklist_node_in_cache(&mut cache.whitelist, Some(&n_b), "node-b", now_ts);
+        save_disk_cache(&cp, &cache).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("PUT /proxies/") {
+                        ("204 No Content", String::new())
+                    } else if first_line.contains("GET /providers/proxies") {
+                        ("200 OK", json!({
+                            "providers": {
+                                "free_wl": {
+                                    "name": "free_wl",
+                                    "vehicleType": "File",
+                                    "proxies": [
+                                        { "name": "node-a", "type": "VLESS", "alive": true },
+                                        { "name": "node-b", "type": "VLESS", "alive": true }
+                                    ]
+                                }
+                            }
+                        }).to_string())
+                    } else if first_line.contains("GET /proxies") {
+                        ("200 OK", json!({
+                            "proxies": {
+                                "PROXY": { "name": "PROXY", "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "node-a", "node-b"] },
+                                "🛡️ Whitelist": { "name": "🛡️ Whitelist", "type": "Selector", "now": "node-a", "all": ["node-a", "node-b"] },
+                                "node-a": { "name": "node-a", "type": "VLESS", "alive": true },
+                                "node-b": { "name": "node-b", "type": "VLESS", "alive": true }
+                            }
+                        }).to_string())
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = true;
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let chosen = switch_pool_node(&state, FreeSubMode::Whitelist, "node-b").await.unwrap();
+        srv.abort();
+        assert_eq!(chosen, "node-b");
+        let after_cache = load_disk_cache(&cp).await;
+        assert!(
+            !is_node_blacklisted(after_cache.mode_ref(FreeSubMode::Whitelist), &n_b, "node-b", now_ts + 10),
+            "ручное переключение на узел из истории должно снимать его из ЧС"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::mihomo::invalidate_proxies_cache();
+    }
+
+    #[test]
+    fn regression_generation_cancellation_stops_l7_loop_immediately() {
+        let src = include_str!("mod.rs");
+        let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(prod.contains("FOREGROUND_L7_MAX_CANDIDATES"));
+        assert!(prod.contains("FOREGROUND_L7_BUDGET_SECS"));
+        assert!(prod.contains("WATCHDOG_BLACKLIST_TTL_SECS"));
+        assert!(prod.matches("if current_mode_generation(mode) != my_gen").count() >= 5);
+    }
+
+    #[test]
+    fn regression_pick_faster_pool_candidate_never_fabricates_450ms_for_uncached_node() {
+        let nodes = vec![
+            json!({"name": "slow-vless", "type": "vless", "server": "1.1.1.1", "port": 443}),
+            json!({"name": "uncached-vless", "type": "vless", "server": "2.2.2.2", "port": 443}),
+        ];
+        let mut mc = ModeCache::default();
+        let now_ts = 1_700_000_000;
+
+        // Без замера в PING_CACHE и без last_delay_ms на диске — НЕ выдумывать 450 мс!
+        let picked = pick_faster_pool_candidate(
+            &nodes,
+            &mc,
+            "slow-vless",
+            2500,
+            false,
+            now_ts,
+            |_| None,
+        );
+        assert_eq!(picked, None, "must not fabricate 450ms for uncached candidate");
+
+        // Если реальный last_delay_ms есть в working_nodes и он действительно быстрее (>= 2x), он используется
+        mc.working_nodes.push(CachedWorkingNode {
+            proxy: nodes[1].clone(),
+            last_ok_ts: now_ts,
+            last_delay_ms: 300,
+            quality_score: 0,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        let picked_disk = pick_faster_pool_candidate(
+            &nodes,
+            &mc,
+            "slow-vless",
+            2500,
+            false,
+            now_ts,
+            |_| None,
+        );
+        assert_eq!(picked_disk, Some(("uncached-vless".to_string(), 300)));
+    }
+
+    #[tokio::test]
+    async fn regression_get_pool_and_history_uses_disk_delay_when_ping_cache_expired() {
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
+
+        let dir = std::env::temp_dir().join(format!("xkeen_pool_ping_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+
+        let node_a = json!({"name": "disk-node-a", "type": "vless", "server": "11.22.33.44", "port": 443});
+        let yaml = crate::subscription_parser::proxies_to_mihomo_yaml(&[node_a.clone()]).unwrap();
+        std::fs::write(prov_dir.join("free_wl.yaml"), yaml).unwrap();
+
+        let cp = cache_file_path(&cfg_path);
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut cache = FreeSubCache::default();
+        cache.whitelist.working_nodes.push(CachedWorkingNode {
+            proxy: node_a,
+            last_ok_ts: now_ts,
+            last_delay_ms: 615,
+            quality_score: 0,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        save_disk_cache(&cp, &cache).await.unwrap();
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = 1;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let pool = get_pool_and_history(&state, FreeSubMode::Whitelist).await;
+        let nodes_arr = pool.get("nodes").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(nodes_arr.len(), 1);
+        assert_eq!(nodes_arr[0].get("ping_ms").and_then(|v| v.as_i64()), Some(615));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regression_vpn_and_whitelist_status_and_run_locks_are_isolated() {
+        let dir = std::env::temp_dir().join(format!("xkeen_free_sub_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let cfg = crate::config::AppConfig::default();
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        reset_free_sub_runtime_and_cache(&state).await;
+
+        // 1. Занятый run_lock(Whitelist) не блокирует run_lock(Vpn)
+        let _wl_guard = run_lock(FreeSubMode::Whitelist).lock().await;
+        assert!(
+            run_lock(FreeSubMode::Vpn).try_lock().is_ok(),
+            "фоновый добор Whitelist не должен блокировать запуск Vpn"
+        );
+
+        // 2. Параллельные обновления статусов Vpn и Whitelist не перетирают друг друга
+        let vpn_task = async {
+            for i in 1..=50usize {
+                update_status(FreeSubMode::Vpn, |st| {
+                    st.running = true;
+                    st.stage = FreeSubStage::L7;
+                    st.stats.working_count = i;
+                    st.active_node = Some(format!("vpn-node-{i}"));
+                    st.updated_at = Some(100);
+                })
+                .await;
+                tokio::task::yield_now().await;
+            }
+        };
+        let wl_task = async {
+            for i in 1..=50usize {
+                update_status(FreeSubMode::Whitelist, |st| {
+                    st.running = true;
+                    st.stage = FreeSubStage::Prefilter;
+                    st.stats.working_count = i + 100;
+                    st.active_node = Some(format!("wl-node-{i}"));
+                    st.updated_at = Some(200);
+                })
+                .await;
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(vpn_task, wl_task);
+
+        let vpn_st = get_status_for(FreeSubMode::Vpn).await;
+        let wl_st = get_status_for(FreeSubMode::Whitelist).await;
+        assert_eq!(vpn_st.mode, FreeSubMode::Vpn);
+        assert_eq!(vpn_st.stage, FreeSubStage::L7);
+        assert_eq!(vpn_st.stats.working_count, 50);
+        assert_eq!(vpn_st.active_node.as_deref(), Some("vpn-node-50"));
+
+        assert_eq!(wl_st.mode, FreeSubMode::Whitelist);
+        assert_eq!(wl_st.stage, FreeSubStage::Prefilter);
+        assert_eq!(wl_st.stats.working_count, 150);
+        assert_eq!(wl_st.active_node.as_deref(), Some("wl-node-50"));
+
+        // 3. HTTP-хэндлер get_free_sub_status поддерживает ?mode= и возвращает оба statuses
+        let resp_vpn = crate::api::servers::subscriptions::get_free_sub_status(
+            axum::extract::Query(crate::api::servers::subscriptions::FreeSubStatusQuery {
+                mode: Some(FreeSubMode::Vpn),
+            }),
+        )
+        .await;
+        let bytes_vpn = axum::body::to_bytes(resp_vpn.into_body(), 65536).await.unwrap();
+        let val_vpn: serde_json::Value = serde_json::from_slice(&bytes_vpn).unwrap();
+        assert_eq!(val_vpn["data"]["status"]["mode"], "vpn");
+        assert_eq!(val_vpn["data"]["status"]["active_node"], "vpn-node-50");
+        assert_eq!(val_vpn["data"]["statuses"]["whitelist"]["active_node"], "wl-node-50");
+
+        // 4. reset_free_sub_runtime_and_cache сбрасывает оба режима
+        drop(_wl_guard);
+        reset_free_sub_runtime_and_cache(&state).await;
+        let (after_vpn, after_wl) = get_all_statuses().await;
+        assert!(!after_vpn.running && after_vpn.stage == FreeSubStage::Idle && after_vpn.mode == FreeSubMode::Vpn);
+        assert!(!after_wl.running && after_wl.stage == FreeSubStage::Idle && after_wl.mode == FreeSubMode::Whitelist);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_interleave_source_nodes_prioritizes_and_round_robins() {
+        let s1 = vec![json!({"name": "yd-1"}), json!({"name": "yd-2"})];
+        let s2 = vec![json!({"name": "gh-1"}), json!({"name": "gh-2"}), json!({"name": "gh-3"})];
+        let mixed = interleave_source_nodes(vec![s1, s2], 10);
+        let names: Vec<&str> = mixed
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, vec!["yd-1", "gh-1", "yd-2", "gh-2", "gh-3"]);
+        let capped = interleave_source_nodes(
+            vec![vec![json!({"name": "a1"}), json!({"name": "a2"})], vec![json!({"name": "b1"})]],
+            2,
+        );
+        assert_eq!(capped.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn regression_l7_batch_grace_window_prefers_healthy_node_over_fast_penalized_node() {
+        let nodes = vec![json!({"name": "penalized-fast"}), json!({"name": "healthy-node"})];
+        let res = probe_l7_batch_metrics_with(nodes, 2, true, |node| async move {
+            let nm = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if nm == "penalized-fast" {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                (
+                    node,
+                    Ok(mihomo::L7ProbeMetrics {
+                        rtt_ms: 100,
+                        quality_score: 4300,
+                    }),
+                )
+            } else {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                (
+                    node,
+                    Ok(mihomo::L7ProbeMetrics {
+                        rtt_ms: 180,
+                        quality_score: 320,
+                    }),
+                )
+            }
+        })
+        .await;
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].0["name"], "healthy-node");
+        assert_eq!(res[0].1.quality_score, 320);
+    }
+
+    #[test]
+    fn regression_pick_faster_pool_candidate_compares_quality_score_not_raw_ping() {
+        let nodes = vec![
+            json!({"name": "active-node", "type": "vless", "server": "1.1.1.1", "port": 443}),
+            json!({"name": "dead-tg-cand", "type": "vless", "server": "2.2.2.2", "port": 443}),
+        ];
+        let mut mc = ModeCache::default();
+        let now_ts = 1_700_000_000;
+        mc.working_nodes.push(CachedWorkingNode {
+            proxy: nodes[1].clone(),
+            last_ok_ts: now_ts,
+            last_delay_ms: 90,
+            quality_score: 4200,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        let picked = pick_faster_pool_candidate(
+            &nodes,
+            &mc,
+            "active-node",
+            1100,
+            false,
+            now_ts,
+            |_| Some(90),
+        );
+        assert_eq!(
+            picked, None,
+            "нельзя переключаться на кандидата с quality_score=4200 только из-за низкого raw RTT 90 мс"
+        );
+    }
+
+    #[test]
+    fn regression_select_best_next_pool_node_prefers_alive_tcp_and_lowest_score() {
+        let names = vec![
+            "cur-node".to_string(),
+            "dead-node".to_string(),
+            "quic-node".to_string(),
+            "alive-slow".to_string(),
+            "alive-fast".to_string(),
+        ];
+        let nodes = vec![
+            json!({"name": "cur-node", "type": "vless", "server": "1.1.1.1", "port": 443}),
+            json!({"name": "dead-node", "type": "vless", "server": "2.2.2.2", "port": 443}),
+            json!({"name": "quic-node", "type": "hysteria2", "server": "3.3.3.3", "port": 443}),
+            json!({"name": "alive-slow", "type": "vless", "server": "4.4.4.4", "port": 443}),
+            json!({"name": "alive-fast", "type": "vless", "server": "5.5.5.5", "port": 443}),
+        ];
+        let mut mc = ModeCache::default();
+        mc.working_nodes.push(CachedWorkingNode {
+            proxy: nodes[1].clone(),
+            last_ok_ts: 100,
+            last_delay_ms: 80,
+            quality_score: 120,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        mc.working_nodes.push(CachedWorkingNode {
+            proxy: nodes[3].clone(),
+            last_ok_ts: 100,
+            last_delay_ms: 350,
+            quality_score: 700,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        mc.working_nodes.push(CachedWorkingNode {
+            proxy: nodes[4].clone(),
+            last_ok_ts: 100,
+            last_delay_ms: 140,
+            quality_score: 260,
+            mode: FreeSubMode::Whitelist,
+            high_priority: false,
+            total_bytes: 0,
+        });
+        let mut prov_proxies = std::collections::BTreeMap::new();
+        prov_proxies.insert("dead-node".to_string(), json!({"alive": false}));
+        prov_proxies.insert("quic-node".to_string(), json!({"alive": true}));
+        prov_proxies.insert("alive-slow".to_string(), json!({"alive": true}));
+        prov_proxies.insert("alive-fast".to_string(), json!({"alive": true}));
+
+        let picked = select_best_next_pool_node(
+            &names,
+            &nodes,
+            &mc,
+            Some("cur-node"),
+            Some(&prov_proxies),
+        );
+        assert_eq!(picked.as_deref(), Some("alive-fast"));
+    }
+
+    #[test]
+    fn regression_amnesty_blacklist_gradual_preserves_manual_bans_and_newest_entries() {
+        let mut mc = ModeCache::default();
+        let now_ts = 1_700_000_000;
+        mc.blacklist.insert("expired".into(), now_ts - 10);
+        mc.blacklist.insert("wd-short".into(), now_ts + WATCHDOG_BLACKLIST_TTL_SECS);
+        mc.blacklist.insert("manual-old".into(), now_ts + BLACKLIST_TTL_SECS - 100);
+        mc.blacklist.insert("manual-new".into(), now_ts + BLACKLIST_TTL_SECS);
+
+        let removed1 = amnesty_blacklist_gradual(&mut mc, now_ts);
+        assert!(removed1 >= 1);
+        assert!(!mc.blacklist.contains_key("wd-short"));
+        assert!(mc.blacklist.contains_key("manual-old"));
+        assert!(mc.blacklist.contains_key("manual-new"));
+
+        let removed2 = amnesty_blacklist_gradual(&mut mc, now_ts);
+        assert_eq!(removed2, 1);
+        assert!(!mc.blacklist.contains_key("manual-old"));
+        assert!(mc.blacklist.contains_key("manual-new"));
     }
 }

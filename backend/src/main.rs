@@ -124,6 +124,52 @@ pub struct ConfigRoutingGuard {
 }
 
 impl AppState {
+    /// Мгновенный снимок текущего `AppConfig` без удержания `RwLockReadGuard` через `.await`.
+    pub async fn cfg_snapshot(&self) -> Arc<config::AppConfig> {
+        self.config.read().await.clone()
+    }
+
+    /// Атомарно обновить только `config.json` под `config_lock`, сохранить на диск и обновить `state.config`.
+    pub async fn update_config<F, R>(&self, mutate: F) -> Result<(Arc<config::AppConfig>, R), String>
+    where
+        F: FnOnce(&mut config::AppConfig) -> R,
+    {
+        self.try_update_config(|cfg| Ok(mutate(cfg))).await
+    }
+
+    /// Атомарно обновить `config.json` с валидацией мутации (при `Err` диск и память не меняются).
+    pub async fn try_update_config<F, R>(&self, mutate: F) -> Result<(Arc<config::AppConfig>, R), String>
+    where
+        F: FnOnce(&mut config::AppConfig) -> Result<R, String>,
+    {
+        let _guard = self.config_lock.lock().await;
+        let mut cfg = (**self.config.read().await).clone();
+        let res = mutate(&mut cfg)?;
+        config::save(&self.config_path, &cfg).await?;
+        let arc = Arc::new(cfg);
+        *self.config.write().await = arc.clone();
+        Ok((arc, res))
+    }
+
+    /// Неблокирующее обновление `config.json` (для фоновых/периодических флушей метрик без ожидания `config_lock`).
+    pub async fn try_update_config_nonblocking<F, R>(
+        &self,
+        mutate: F,
+    ) -> Option<Result<(Arc<config::AppConfig>, R), String>>
+    where
+        F: FnOnce(&mut config::AppConfig) -> R,
+    {
+        let _guard = self.config_lock.try_lock().ok()?;
+        let mut cfg = (**self.config.read().await).clone();
+        let res = mutate(&mut cfg);
+        if let Err(e) = config::save(&self.config_path, &cfg).await {
+            return Some(Err(e));
+        }
+        let arc = Arc::new(cfg);
+        *self.config.write().await = arc.clone();
+        Some(Ok((arc, res)))
+    }
+
     /// Захватить `config_lock` и `routing_lock` строго в каноническом порядке.
     pub async fn lock_config_and_routing(&self) -> ConfigRoutingGuard {
         let config_guard = self.config_lock.clone().lock_owned().await;
@@ -275,81 +321,6 @@ fn create_init(port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod regression_bug_4_tests {
-    /// Стартовый блок синхронизации БС (продакшн-часть; тесты стоят выше по файлу, поэтому rfind).
-    fn startup_wl_block() -> &'static str {
-        let src = include_str!("main.rs");
-        let start = src.rfind("// Синхронизация режима обхода белых списков (100% full tunnel)").expect("начало блока");
-        let end = start + src[start..].find("// Авто-миграция и плановое").expect("конец блока");
-        &src[start..end]
-    }
-
-    #[test]
-    fn regression_bug_4_gaming_not_restored_on_unknown_or_bs_node_after_boot() {
-        // Баг 4: после перезагрузки «узел БС» определялся без учёта подписки, а если Mihomo на 8-й секунде
-        // ещё не отвечал — результат «не БС», и игровой режим включался вместе с БС.
-        let b = startup_wl_block();
-        assert!(!b.contains("failover::is_whitelist_server(&s.name, &s.id, &cfg)"), "БС определяется с учётом подписки");
-        assert!(!b.contains(".await.ok().flatten()"), "недоступный Mihomo не считается «не БС»");
-        assert!(b.contains("failover::startup_gaming_restore_allowed("), "решение о восстановлении — через проверяемую функцию");
-        assert!(!b.contains("config::save(&wl_sync_state.config_path"), "восстановление атомарно вместе с правилами");
-    }
-}
-
-#[cfg(test)]
-mod init_script_tests {
-    use super::init_script_content;
-
-    #[test]
-    fn init_script_waits_for_entware_and_recovers_mihomo() {
-        let script = init_script_content(1001);
-        assert!(script.contains("wait_for_opt()"));
-        assert!(script.contains("while [ \"$attempt\" -lt 120 ]; do"));
-        assert!(script.contains("sleep 0.5"));
-        assert!(script.contains("ensure_xkeen()"));
-        assert!(script.contains("fd_out=true sh \"$XKEEN_INIT\" start on"));
-        assert!(script.contains("Mihomo did not start in 60 seconds"));
-    }
-
-    #[test]
-    fn init_script_uses_pid_file_and_requested_port() {
-        let script = init_script_content(1234);
-        assert!(script.contains("PID_FILE=/opt/var/run/xkeen-route.pid"));
-        assert!(script.contains("PORT=1234"));
-        assert!(script.contains("$BIN\" -p \"$PORT\""));
-        assert!(script.contains("for p in $(pidof \"$NAME\" 2>/dev/null); do"));
-    }
-
-    #[tokio::test]
-    async fn test_startup_whitelist_gaming_auto_recovery_no_deadlock() {
-        let mut cfg = crate::config::AppConfig::default();
-        cfg.gaming.enabled = false;
-        cfg.whitelist.gaming_suspended = true;
-
-        let config_state = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
-        let config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-
-        // 1. Scoped read (must not deadlock write)
-        let (gaming_suspended, is_bs) = {
-            let read_guard = config_state.read().await;
-            (read_guard.whitelist.gaming_suspended, false)
-        };
-
-        // 2. Write lock acquisition
-        if gaming_suspended && !is_bs {
-            let _cfg_guard = config_lock.lock().await;
-            let mut current_cfg = (**config_state.read().await).clone();
-            current_cfg.gaming.enabled = true;
-            current_cfg.whitelist.gaming_suspended = false;
-            *config_state.write().await = std::sync::Arc::new(current_cfg);
-        }
-
-        let final_cfg = config_state.read().await;
-        assert!(final_cfg.gaming.enabled);
-        assert!(!final_cfg.whitelist.gaming_suspended);
-    }
-}
 
 
 /// Управление заголовками кэширования ответов веб-сервера:
@@ -759,7 +730,7 @@ async fn main() {
         // гарантирует XKEEN_BS даже если 7-секундный общий синк отработал раньше,
         // чем поднят firewall KeeneticOS (правила восстановит и NDM-хук)
         if is_bs {
-            let cfg = wl_sync_state.config.read().await;
+            let cfg = wl_sync_state.cfg_snapshot().await;
             if cfg.whitelist.enabled {
                 if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                     let ports = routing::redir_ports(&yaml);
@@ -842,7 +813,7 @@ async fn main() {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         wait_for_router_ready(&sync_state).await;
 
-        let cfg = sync_state.config.read().await;
+        let cfg = sync_state.cfg_snapshot().await;
         override_sync::load_cached_auto_cdns();
         log_i!("[STARTUP] Быстрая синхронизация известных CDN бандлов и игровых доменов с geo_override...");
         if let Err(e) = override_sync::sync_from_config(&cfg, &[]).await {
@@ -1090,5 +1061,195 @@ mod tests {
         let second_pass = reconcile_startup_yaml(&updated, &cfg)
             .expect("second reconcile pass should succeed");
         assert!(second_pass.is_none(), "reconcile_startup_yaml must be idempotent when YAML is already up to date");
+    }
+}
+
+#[cfg(test)]
+mod regression_bug_4_tests {
+    /// Стартовый блок синхронизации БС (продакшн-часть; тесты стоят выше по файлу, поэтому rfind).
+    fn startup_wl_block() -> &'static str {
+        let src = include_str!("main.rs");
+        let start = src.find("// Синхронизация режима обхода белых списков (100% full tunnel)").expect("начало блока");
+        let end = start + src[start..].find("// Авто-миграция и плановое").expect("конец блока");
+        &src[start..end]
+    }
+
+    #[test]
+    fn regression_bug_4_gaming_not_restored_on_unknown_or_bs_node_after_boot() {
+        // Баг 4: после перезагрузки «узел БС» определялся без учёта подписки, а если Mihomo на 8-й секунде
+        // ещё не отвечал — результат «не БС», и игровой режим включался вместе с БС.
+        let b = startup_wl_block();
+        assert!(!b.contains("failover::is_whitelist_server(&s.name, &s.id, &cfg)"), "БС определяется с учётом подписки");
+        assert!(!b.contains(".await.ok().flatten()"), "недоступный Mihomo не считается «не БС»");
+        assert!(b.contains("failover::startup_gaming_restore_allowed("), "решение о восстановлении — через проверяемую функцию");
+        assert!(!b.contains("config::save(&wl_sync_state.config_path"), "восстановление атомарно вместе с правилами");
+    }
+}
+
+#[cfg(test)]
+mod init_script_tests {
+    use super::init_script_content;
+
+    #[test]
+    fn init_script_waits_for_entware_and_recovers_mihomo() {
+        let script = init_script_content(1001);
+        assert!(script.contains("wait_for_opt()"));
+        assert!(script.contains("while [ \"$attempt\" -lt 120 ]; do"));
+        assert!(script.contains("sleep 0.5"));
+        assert!(script.contains("ensure_xkeen()"));
+        assert!(script.contains("fd_out=true sh \"$XKEEN_INIT\" start on"));
+        assert!(script.contains("Mihomo did not start in 60 seconds"));
+    }
+
+    #[test]
+    fn init_script_uses_pid_file_and_requested_port() {
+        let script = init_script_content(1234);
+        assert!(script.contains("PID_FILE=/opt/var/run/xkeen-route.pid"));
+        assert!(script.contains("PORT=1234"));
+        assert!(script.contains("$BIN\" -p \"$PORT\""));
+        assert!(script.contains("for p in $(pidof \"$NAME\" 2>/dev/null); do"));
+    }
+
+    #[tokio::test]
+    async fn test_startup_whitelist_gaming_auto_recovery_no_deadlock() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gaming.enabled = false;
+        cfg.whitelist.gaming_suspended = true;
+
+        let config_state = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+
+        // 1. Scoped read (must not deadlock write)
+        let (gaming_suspended, is_bs) = {
+            let read_guard = config_state.read().await;
+            (read_guard.whitelist.gaming_suspended, false)
+        };
+
+        // 2. Write lock acquisition
+        if gaming_suspended && !is_bs {
+            let _cfg_guard = config_lock.lock().await;
+            let mut current_cfg = (**config_state.read().await).clone();
+            current_cfg.gaming.enabled = true;
+            current_cfg.whitelist.gaming_suspended = false;
+            *config_state.write().await = std::sync::Arc::new(current_cfg);
+        }
+
+        let final_cfg = config_state.read().await;
+        assert!(final_cfg.gaming.enabled);
+        assert!(!final_cfg.whitelist.gaming_suspended);
+    }
+}
+
+#[cfg(test)]
+mod architecture_invariant_tests {
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_architecture_invariants() {
+        const TEST_CONFIG_WRITE_ALLOWLIST: &[&str] = &[];
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        files.sort();
+        assert!(!files.is_empty(), "не найдены исходники backend/src");
+
+        let needle = concat!(".config.", "write(");
+        let mut violations = Vec::new();
+
+        for path in &files {
+            let rel = path
+                .strip_prefix(&src_root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "transaction.rs" || TEST_CONFIG_WRITE_ALLOWLIST.contains(&rel.as_str()) {
+                continue;
+            }
+            let content = std::fs::read_to_string(path).unwrap();
+            let mut in_impl_app_state = false;
+            for (idx, raw_line) in content.lines().enumerate() {
+                let line_no = idx + 1;
+                let trimmed = raw_line.trim();
+                if rel == "main.rs" {
+                    if trimmed.starts_with("impl AppState {") {
+                        in_impl_app_state = true;
+                        continue;
+                    }
+                    if in_impl_app_state && raw_line == "}" {
+                        in_impl_app_state = false;
+                        continue;
+                    }
+                    if in_impl_app_state {
+                        continue;
+                    }
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if raw_line.contains(needle) {
+                    violations.push(format!("{rel}:{line_no}: {trimmed}"));
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "Обнаружен прямой вызов {needle} вне transaction.rs и AppState::update_config*:\n{}",
+            violations.join("\n")
+        );
+
+        let cleaned_files = [
+            "mihomo.rs",
+            "failover/mod.rs",
+            "api/mod.rs",
+            "vkturn/mod.rs",
+            "override_sync.rs",
+            "main.rs",
+        ];
+        let fn_prefixes = [
+            "fn ",
+            "async fn ",
+            "pub fn ",
+            "pub async fn ",
+            "pub(crate) fn ",
+            "pub(crate) async fn ",
+            "pub(super) fn ",
+            "pub(super) async fn ",
+        ];
+        for rel in cleaned_files {
+            let content = std::fs::read_to_string(src_root.join(rel)).unwrap();
+            let mut first_cfg_test: Option<usize> = None;
+            let mut last_top_fn: usize = 0;
+            for (idx, line) in content.lines().enumerate() {
+                let line_no = idx + 1;
+                if first_cfg_test.is_none() && line.trim_start().starts_with("#[cfg(test)]") {
+                    first_cfg_test = Some(line_no);
+                }
+                if !line.starts_with(' ')
+                    && !line.starts_with('\t')
+                    && fn_prefixes.iter().any(|p| line.starts_with(p))
+                {
+                    last_top_fn = line_no;
+                }
+            }
+            if let Some(cfg_line) = first_cfg_test {
+                assert!(
+                    cfg_line > last_top_fn,
+                    "{rel}: #[cfg(test)] на строке {cfg_line} находится выше рабочей функции на строке {last_top_fn}"
+                );
+            }
+        }
     }
 }

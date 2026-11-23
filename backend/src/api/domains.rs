@@ -371,7 +371,7 @@ pub async fn set_device_domain_rules(
 
 /// GET /api/system/geo-info — информация о базах GeoIP и GeoSite
 pub async fn get_geo_info(State(state): State<AppState>) -> Response {
-    let cfg = state.config.read().await;
+    let cfg = state.cfg_snapshot().await;
     let base_dir = std::path::Path::new(&cfg.mihomo.config_path).parent().unwrap_or(std::path::Path::new("/opt/etc/mihomo"));
     let geoip_path = base_dir.join("geoip.dat");
     let geosite_path = base_dir.join("geosite.dat");

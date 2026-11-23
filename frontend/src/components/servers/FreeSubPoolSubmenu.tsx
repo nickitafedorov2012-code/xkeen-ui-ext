@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../../api'
-import type { FreeSubMode, FreeSubPoolInfo } from '../../types'
+import type { FreeSubMode, FreeSubPoolInfo, FreeSubStatus } from '../../types'
 import { formatQuotaBytes } from './serversHelpers'
 
 interface Props {
@@ -8,6 +8,8 @@ interface Props {
   notify?: (msg: string, isError?: boolean) => void
   onUpdated: () => void
   open: boolean
+  freeSubStatus?: FreeSubStatus | null
+  onJobStarted?: (mode: FreeSubMode) => void
 }
 
 function formatDuration(secs: number): string {
@@ -29,28 +31,48 @@ function reasonStyle(reason: string): React.CSSProperties {
   return { background: 'rgba(148,163,184,0.12)', color: 'var(--muted)', borderColor: 'rgba(148,163,184,0.28)' }
 }
 
-export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
+export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open, freeSubStatus, onJobStarted }: Props) {
   const [pool, setPool] = useState<FreeSubPoolInfo | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
+  const prevRunningRef = useRef(false)
+  const prevWorkingRef = useRef<number | undefined>(undefined)
 
-  const loadPool = useCallback(async () => {
-    setLoading(true)
+  const loadPool = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const data = await apiGet<FreeSubPoolInfo>(`providers/free-sub/pool?mode=${mode}`)
       setPool(data)
     } catch (e) {
-      notify?.(`Ошибка загрузки пула: ${e instanceof Error ? e.message : String(e)}`, true)
+      if (!silent) {
+        notify?.(`Ошибка загрузки пула: ${e instanceof Error ? e.message : String(e)}`, true)
+      }
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [mode, notify])
 
   useEffect(() => {
-    if (open) {
+    if (!open) return
+    void loadPool(false)
+    const timer = window.setInterval(() => {
+      void loadPool(true)
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [open, loadPool])
+
+  useEffect(() => {
+    const isThisModeRunning = Boolean(freeSubStatus?.running && freeSubStatus.mode === mode)
+    const curWorking = freeSubStatus?.mode === mode ? freeSubStatus.stats?.working_count : undefined
+    const finished = prevRunningRef.current && !isThisModeRunning
+    const countChanged =
+      curWorking !== undefined && prevWorkingRef.current !== undefined && curWorking !== prevWorkingRef.current
+    prevRunningRef.current = isThisModeRunning
+    prevWorkingRef.current = curWorking
+    if (open && (finished || countChanged)) {
       void loadPool()
     }
-  }, [open, loadPool])
+  }, [open, freeSubStatus, mode, loadPool])
 
   if (!open) return null
 
@@ -119,7 +141,8 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
           type="button"
           className="btn sm ghost"
           data-testid={`free-sub-prev-${mode}`}
-          disabled={busy !== null || !pool || pool.pool_total === 0}
+          disabled={busy !== null || !pool || pool.pool_total < 2}
+          title={pool && pool.pool_total < 2 ? 'В пуле меньше 2 узлов — нажмите «Добрать ещё»' : 'Предыдущий узел пула'}
           onClick={() =>
             void runAction('prev', async () => {
               const res = await apiPost<{ active_node: string }>('providers/free-sub/switch-node', {
@@ -137,7 +160,8 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
           type="button"
           className="btn sm ghost"
           data-testid={`free-sub-next-${mode}`}
-          disabled={busy !== null || !pool || pool.pool_total === 0}
+          disabled={busy !== null || !pool || pool.pool_total < 2}
+          title={pool && pool.pool_total < 2 ? 'В пуле меньше 2 узлов — нажмите «Добрать ещё»' : 'Следующий узел пула'}
           onClick={() =>
             void runAction('next', async () => {
               const res = await apiPost<{ active_node: string }>('providers/free-sub/switch-node', {
@@ -158,14 +182,20 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
           disabled={busy !== null || !pool || pool.pool_total === 0}
           onClick={() =>
             void runAction('blacklist', async () => {
-              const res = await apiPost<{ active_node: string | null }>('providers/free-sub/blacklist-node', {
-                mode,
-              })
-              notify?.(
-                res.active_node
-                  ? `Узел в ЧС (24ч), активен: ${res.active_node}`
-                  : 'Узел добавлен в ЧС (24ч), пул пуст'
+              const res = await apiPost<{ active_node: string | null; refill_started?: boolean; message?: string }>(
+                'providers/free-sub/blacklist-node',
+                { mode },
               )
+              if (res.refill_started) {
+                onJobStarted?.(mode)
+                notify?.(res.message || 'Пул исчерпан — запущен автоподбор нового рабочего узла…')
+              } else {
+                notify?.(
+                  res.active_node
+                    ? `Узел в ЧС (24ч), активен: ${res.active_node}`
+                    : res.message || 'Узел добавлен в ЧС (24ч), пул пуст'
+                )
+              }
             })
           }
         >
@@ -176,17 +206,58 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
           type="button"
           className="btn sm ghost"
           data-testid={`free-sub-refill-${mode}`}
-          disabled={busy !== null}
+          disabled={busy !== null || Boolean(freeSubStatus?.running && freeSubStatus.mode === mode)}
           onClick={() =>
             void runAction('refill', async () => {
               await apiPost('providers/free-sub/refill', { mode })
+              onJobStarted?.(mode)
               notify?.('Запущен фоновый добор узлов без обрыва сессии')
             })
           }
         >
           🔄 Добрать ещё
         </button>
+
+        {pool && pool.pool_total === 0 && !(freeSubStatus?.running && freeSubStatus.mode === mode) && (
+          <button
+            type="button"
+            className="btn sm primary"
+            data-testid={`free-sub-connect-empty-${mode}`}
+            disabled={busy !== null || Boolean(freeSubStatus?.running)}
+            onClick={() =>
+              void runAction('connect-empty', async () => {
+                await apiPost('providers/free-sub/connect', { mode })
+                onJobStarted?.(mode)
+                notify?.('Запущен поиск и подключение рабочего узла…')
+              })
+            }
+          >
+            🔍 Подобрать рабочий узел
+          </button>
+        )}
       </div>
+
+      {freeSubStatus?.running && freeSubStatus.mode === mode && (
+        <div
+          data-testid={`free-sub-submenu-progress-${mode}`}
+          style={{
+            fontSize: 11,
+            color: '#7dd3fc',
+            padding: '5px 8px',
+            borderRadius: 6,
+            background: 'rgba(56, 189, 248, 0.08)',
+            border: '1px solid rgba(56, 189, 248, 0.25)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}
+        >
+          <div>⏳ {freeSubStatus.stage_label || 'Идёт добор узлов…'}</div>
+          <div style={{ fontSize: 10, opacity: 0.85 }}>
+            TCP: {freeSubStatus.stats.tcp_passed}/{freeSubStatus.stats.tcp_checked} · L7: {freeSubStatus.stats.l7_passed}/{freeSubStatus.stats.l7_checked} · Рабочих: {freeSubStatus.stats.working_count}
+          </div>
+        </div>
+      )}
 
       <div>
         <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>

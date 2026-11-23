@@ -475,10 +475,7 @@ pub async fn login(
             .into_response();
     }
 
-    let (auth_cfg, config_path) = {
-        let cfg = state.config.read().await;
-        (cfg.auth.clone(), state.config_path.clone())
-    };
+    let auth_cfg = state.cfg_snapshot().await.auth.clone();
 
     if !auth_cfg.enabled {
         return api_ok(json!({ "authenticated": true, "message": "Авторизация отключена" }));
@@ -498,22 +495,22 @@ pub async fn login(
     // Если пароль был в старом формате SHA256, бесшовно мигрируем на устойчивый PBKDF2
     if !auth_cfg.password_hash.starts_with("$pbkdf2$") {
         let new_hash = hash_password_async(body.password.clone(), auth_cfg.salt.clone()).await;
-        let _guard = state.config_lock.lock().await;
-        let mut cur = (**state.config.read().await).clone();
-        cur.auth.password_hash = new_hash;
-        let _ = config::save(&config_path, &cur).await;
-        *state.config.write().await = std::sync::Arc::new(cur);
+        let _ = state
+            .update_config(|cur| {
+                cur.auth.password_hash = new_hash;
+            })
+            .await;
         log_i!("Пароль пользователя успешно автоматически мигрирован на PBKDF2-HMAC-SHA256");
     }
 
     // Если секрет пуст, сгенерируем и сохраним
     let secret = if auth_cfg.session_secret.is_empty() {
         let new_secret = generate_secret();
-        let _guard = state.config_lock.lock().await;
-        let mut cur = (**state.config.read().await).clone();
-        cur.auth.session_secret = new_secret.clone();
-        let _ = config::save(&config_path, &cur).await;
-        *state.config.write().await = std::sync::Arc::new(cur);
+        let _ = state
+            .update_config(|cur| {
+                cur.auth.session_secret = new_secret.clone();
+            })
+            .await;
         new_secret
     } else {
         auth_cfg.session_secret
@@ -559,43 +556,62 @@ pub async fn change_password(
     State(state): State<AppState>,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Response {
-    let _guard = state.config_lock.lock().await;
-    let mut cur = (**state.config.read().await).clone();
+    let snap = state.cfg_snapshot().await;
 
     // A-02: текущий пароль требуется ВСЕГДА, когда хеш уже существует (даже при
     // auth.enabled=false): иначе любой LAN-запрос мог перезаписать существующий
     // пароль и захватить панель. Бутстрап (первый пароль при пустом хеше) разрешён.
-    if !cur.auth.password_hash.is_empty() {
+    if !snap.auth.password_hash.is_empty() {
         let curr = body.current_password.unwrap_or_default();
-        if !verify_password_async(curr, cur.auth.salt.clone(), cur.auth.password_hash.clone()).await {
+        if !verify_password_async(curr, snap.auth.salt.clone(), snap.auth.password_hash.clone()).await {
             return api_err("Текущий пароль указан неверно");
         }
     }
 
-    if body.enabled {
-        if body.new_password.trim().is_empty() && cur.auth.password_hash.is_empty() {
+    let prepared_creds = if body.enabled {
+        if body.new_password.trim().is_empty() && snap.auth.password_hash.is_empty() {
             return api_err("Пароль не может быть пустым");
         }
         if !body.new_password.trim().is_empty() {
             let salt = generate_salt();
             let hash = hash_password_async(body.new_password.clone(), salt.clone()).await;
-            cur.auth.salt = salt;
-            cur.auth.password_hash = hash;
-            cur.auth.session_secret = generate_secret();
+            Some((salt, hash))
+        } else {
+            None
         }
-        cur.auth.enabled = true;
-        log_i!("Включена защита паролем веб-панели (PBKDF2)");
     } else {
-        cur.auth.enabled = false;
-        // При отключении auth очищаем session_secret для инвалидации всех старых сессий
-        cur.auth.session_secret = generate_secret();
-        log_i!("Защита паролем веб-панели отключена");
-    }
+        None
+    };
 
-    if let Err(e) = config::save(&state.config_path, &cur).await {
+    if let Err(e) = state
+        .try_update_config(|cur| {
+            if cur.auth.password_hash != snap.auth.password_hash {
+                return Err("Пароль был изменён параллельным запросом, повторите попытку".to_string());
+            }
+            if body.enabled {
+                if let Some((salt, hash)) = prepared_creds {
+                    cur.auth.salt = salt;
+                    cur.auth.password_hash = hash;
+                    cur.auth.session_secret = generate_secret();
+                }
+                cur.auth.enabled = true;
+            } else {
+                cur.auth.enabled = false;
+                // При отключении auth очищаем session_secret для инвалидации всех старых сессий
+                cur.auth.session_secret = generate_secret();
+            }
+            Ok(())
+        })
+        .await
+    {
         return api_err(format!("Ошибка сохранения настроек: {}", e));
     }
-    *state.config.write().await = std::sync::Arc::new(cur);
+
+    if body.enabled {
+        log_i!("Включена защита паролем веб-панели (PBKDF2)");
+    } else {
+        log_i!("Защита паролем веб-панели отключена");
+    }
     api_ok(json!({ "saved": true, "enabled": body.enabled }))
 }
 
