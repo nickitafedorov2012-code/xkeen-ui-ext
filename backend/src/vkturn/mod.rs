@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 use crate::config::VkTurnConfig;
 
 /// Тег релиза xkeen-ui-ext, в котором опубликованы бинарники ядра (см. scripts/build-csqtt-core.sh).
-pub const CORE_TAG: &str = "csqtt-core-0e90df2";
+pub const CORE_TAG: &str = "csqtt-core-mw-0e90df2";
 /// Репозиторий и коммит, из которых собрано ядро.
 pub const CORE_UPSTREAM: &str = "Afteroid/csqttr";
 pub const CORE_UPSTREAM_COMMIT: &str = "0e90df237583738741b50e86e4f51f87e96c94da";
@@ -119,7 +119,7 @@ pub const CAPTCHA_NO_WEBVIEW_REPLY: &str = "CAPTCHA_RESULT|error:webview unavail
 
 /// SHA-256 бинарников CORE_TAG (вывод scripts/build-csqtt-core.sh).
 pub const CORE_SHA256: &[(&str, &str)] = &[
-    ("csqtt-client-linux-arm64", "27cbeab0783758820c3973c7eda81b7ca83bcaed84b5579be5c0521509f9053b"),
+    ("csqtt-client-linux-arm64", "835410a60aa2c413030260ba80e3efa8255f02326395108321a63c2597a1bef7"),
 ];
 
 /// Сопоставление с архитектурами от updater::detect_mihomo_arch().
