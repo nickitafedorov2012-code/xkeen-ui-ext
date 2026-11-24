@@ -246,6 +246,12 @@ async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &st
     }
 }
 
+/// Публичный хелпер для чтения сырого JSON из RCI-эндпоинта с автоматической авторизацией.
+pub async fn get_raw_json(http: &reqwest::Client, cfg: &AppConfig, path: &str) -> Result<Value, String> {
+    let token = ensure_auth(http, cfg).await?;
+    rci_get(http, cfg, &token, path).await
+}
+
 async fn rci_get_once(
     http: &reqwest::Client,
     cfg: &AppConfig,

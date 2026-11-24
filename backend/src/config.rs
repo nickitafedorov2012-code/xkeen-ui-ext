@@ -531,6 +531,45 @@ pub struct AppConfig {
     /// Настройки VK-туннеля (обход белых списков через TURN-серверы ВК-звонков, ядро WDTT)
     #[serde(default)]
     pub vkturn: VkTurnConfig,
+    /// Настройки Multi-WAN балансировки и бесшовного хотсвапа нескольких каналов/модемов.
+    #[serde(default)]
+    pub multiwan: MultiWanConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiWanWeightMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MultiWanChannelConfig {
+    pub rci_id: String,
+    pub weight: u8,
+    pub enabled: bool,
+}
+
+impl Default for MultiWanChannelConfig {
+    fn default() -> Self {
+        Self {
+            rci_id: String::new(),
+            weight: 50,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct MultiWanConfig {
+    pub enabled: bool,
+    pub mode: MultiWanWeightMode,
+    /// Закреплять платные подписки за одним живым WAN для защиты от бана за 2 IP.
+    pub single_ip_subscriptions: bool,
+    pub channels: Vec<MultiWanChannelConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1394,6 +1433,7 @@ impl Default for AppConfig {
                 m
             },
             vkturn: VkTurnConfig::default(),
+            multiwan: MultiWanConfig::default(),
         }
     }
 }

@@ -191,3 +191,29 @@
   - Фронтенд: `useUpdateCheck.ts` / `Header.tsx` (900s poll + `?light=1`), `FreeSubPoolSubmenu.tsx` (скрыта лишняя кнопка «Подключить снова» у активного узла), `ServerList.tsx` + `cards-servers.css` (компактный вид для `FREE-WL`/`FREE-VPN` без наплывов и переносов).
   - Тесты и сборка: `vitest` (`46/46`, `391/391`), `vite build` (`2.00s`), `cargo test` (`860/860`, 0 warnings в тестах), `cargo zigbuild --release --target aarch64-unknown-linux-musl` (`11,767,632` Б, SHA-256 `c07ecb78...`).
   - Живая верификация на `192.168.1.1`: бэкап `xr-20261123-201231-635` (`200`, `32093` Б), `/api/status` == `v1.17.0`, `/api/mihomo/releases?light=1` / `/api/update/check` / `/api/mihomo/releases` (`200 OK`, кэш `~20 мс`), `disconnect` сбросил `whitelist.enabled=false`, `FREE-WL` `connect` + `refill` без схлопывания пула, `0` DHCP-флапов `0.0.0.0`, браузерный аудит (`step_24_shot_1_compact_fixed_collapsed.png` и `step_28_shot_1_compact_fixed_expanded.png` проверены лично: 0 ошибок консоли/HTTP). Удалён временный `/opt/sbin/xkeen-route.bak_pre_1_17_0`.
+
+
+---
+
+## Multi-WAN Bonding & Hot-Swap + Updater/FreeSub Fixes
+
+- `[DONE]` **Step 1: `backend/src/updater.rs` & `backend/src/free_sub/mod.rs`** — 27/27 `updater::` and 51/51 `free_sub::` tests passed.
+- `[DONE]` **Step 2: `csqtt-client` Multi-WAN & 0-ms Hot-Swap** (`C:\Users\internet\Desktop\xkeen route\csqttr\rust-client`) — 3/3 `wan_marks` tests passed, `csqtt-client-linux-arm64` cross-compiled, `vendor/gooby` restored.
+- `[DONE]` **Step 3: Backend Multi-WAN Engine & API** (`backend/src/multiwan/`, `config.rs`, `rci.rs`, `vkturn/`, `api/`, `main.rs`) — 4/4 `multiwan::`, 68/68 `vkturn::`.
+- `[DONE]` **Step 4: Frontend Multi-WAN UI & Tests** (`MultiWanCard.tsx`, `MultiWanWidget.tsx`, `VkTurnDetailsSection.tsx`) — 48/48 Vitest files (393/393 tests) passed.
+- `[DONE]` **Step 5: Full Local Verification & ARM64 Build** — `npm test` (48/48 files, 393/393 tests), `npm run build`, `cargo test` (868/868 tests), `xkeen-route` ARM64 musl `zigbuild` succeeded.
+- `[DONE]` **Step 6: Live Deploy & Verification on `192.168.1.1`** — Backups created (`xr-20261124-120503-215`), dual WISP (`apcli0` & `apcli1`) discovered, `ip rule`/`iptables`/ECMP verified, 2-WAN vs 1-WAN RX traffic distribution verified, clean teardown verified, UI screenshots audited 10/10. Ready for user commit approval & version tag.
+
+
+---
+
+### Gap-Closure Pass (Full Prompt Audit)
+- `[DONE]` **Phase 1: True Cohort `SO_MARK` on VK API HTTP Client (`csqttr/rust-client`)** — `Cargo.toml` (`primp` socks), `turn_stream::connect_tcp_marked` (`local_ip`), local loopback SOCKS5 `SO_MARK` forwarder in `wan_marks.rs` (`handle_socks5_client`, `ensure_local_socks5_proxy`, `socks5_proxy_for_credential`, `bind_ip_for_mark`), `auth.rs` (`get_credentials_for_cohort`), 5/5 `wan_marks` tests passed & ARM64 `zigbuild` succeeded (`vendor/gooby` restored cleanly).
+- `[DONE]` **Phase 2: Backend Multi-WAN & Updater Completeness** — `multiwan/discovery.rs` (9/9 `multiwan::` tests passed), `multiwan/routing.rs`, `multiwan/mod.rs`, `updater.rs` (29/29 `updater::` tests passed, 0 warnings).
+- `[DONE]` **Phase 3: Frontend Zero-Touch UI Polish & Tests** — 49/49 Vitest files (394/394 tests) passed, `tsc && vite build` succeeded in 2.51s.
+- `[DONE]` **Phase 4.1: Full Sequential Test & Build Gate** — `npm test` (49/49 files, 394/394 tests), `npm run build` (`2.51s`), `cargo test` (877/877 tests, включая анти-регрессионные тесты для `Origin` в NDM-хуках и приоритета `ip rule` `60..68 < 70..77`), `xkeen-route` ARM64 musl (`12,177,152` B, SHA-256 `F55D17F65002A45844A4D018D9DEAA3CF0298C8F3151E072B856C67EC15F3B31`) + `csqtt-client` ARM64 musl (`10,955,384` B, SHA-256 `527EBC0363EEF171501FCB1EEFD768BA64BC7B6D02607B7DB82A5425AE6F911C`).
+- `[DONE]` **Phase 4.2–4.3: Live Deploy & Verification on `192.168.1.1`** —
+  - Залит финальный `xkeen-route` (`SHA256: f55d17f6...`) и `csqtt-client` (`SHA256: 527ebc03...`), создан и проверен бэкап `xr-20261124-222253-672`, временные `.bak_pre_gap` удалены.
+  - Проверены `ip rule` (`60`/`61` `fwmark`, `68` ECMP `189`, `70`/`71` source-IP), `fib_multipath_hash_policy=0`, `070-xkeen-multiwan.sh` (`Origin: http://127.0.0.1:1001`, ответ `200`), самовосстановление после удаления `OUTPUT -j XKEEN_MULTIWAN_OUT` за `0.20s`, 3× `GET /api/update/check?force=true` (`0.103s`, `0.302s`, `0.309s`).
+  - Замеры скорости (8 направлений): `1-WAN apcli0` `16.86 Mbps`, `1-WAN apcli1` `23.37 Mbps`, `2-WAN BONDING (ECMP)` одновременно задействовал оба канала (`apcli0_RX = 7.03 MB` / `7.26 Mbps` + `apcli1_RX = 2.64 MB` / `2.73 Mbps`).
+  - Визуальный аудит скриншотов (`final_step_6.png` Дашборд, `final_step_8.png` Настройки, `final_step_16.png` VK-туннель) — без обрезаний и наплывов, `TrafficGraph` строго 2 канала. Готово к коммиту (ожидается разрешение пользователя и номер версии).

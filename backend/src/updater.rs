@@ -244,10 +244,91 @@ pub fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy_addr).ok()?;
     reqwest::Client::builder()
         .proxy(proxy)
-        .connect_timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(4))
         .http1_only()
         .build()
         .ok()
+}
+
+/// Клиент, привязанный к локальному IP конкретного WAN-интерфейса (использует source-policy routing pref 50..57).
+pub fn client_bound_to_ip(ip: std::net::IpAddr) -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .local_address(ip)
+        .connect_timeout(Duration::from_secs(4))
+        .no_proxy()
+        .build()
+        .ok()
+}
+
+#[derive(Clone, Debug)]
+struct TransportCandidate {
+    label: String,
+    client: reqwest::Client,
+}
+
+fn build_transport_candidates(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+) -> Vec<TransportCandidate> {
+    let mut out = Vec::new();
+    for raw_ip in wan_ips {
+        if let Ok(ip) = raw_ip.trim().parse::<std::net::IpAddr>() {
+            if let Some(client) = client_bound_to_ip(ip) {
+                out.push(TransportCandidate {
+                    label: format!("wan:{ip}"),
+                    client,
+                });
+            }
+        }
+    }
+    out.push(TransportCandidate {
+        label: "direct".to_string(),
+        client: direct.clone(),
+    });
+    if let Some(p) = proxied_client(proxy_url) {
+        out.push(TransportCandidate {
+            label: "proxy".to_string(),
+            client: p,
+        });
+    }
+    out
+}
+
+/// Запускает операцию одновременно по всем кандидатам (живые WAN, direct, proxy),
+/// возвращает первый успешный результат и немедленно отменяет остальные ветки.
+async fn race_candidates<T, F, Fut>(
+    candidates: Vec<TransportCandidate>,
+    op: F,
+) -> Result<(T, String), String>
+where
+    T: Send + 'static,
+    F: Fn(reqwest::Client) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+{
+    if candidates.is_empty() {
+        return Err("Нет доступных каналов связи".into());
+    }
+    let op = std::sync::Arc::new(op);
+    let mut set = tokio::task::JoinSet::new();
+    for cand in candidates {
+        let label = cand.label;
+        let client = cand.client;
+        let op_c = op.clone();
+        set.spawn(async move { (label, op_c(client).await) });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((label, Ok(val))) => {
+                set.abort_all();
+                return Ok((val, label));
+            }
+            Ok((label, Err(e))) => errors.push(format!("{label}: {e}")),
+            Err(e) => errors.push(format!("task: {e}")),
+        }
+    }
+    Err(errors.join("; "))
 }
 
 /// Вычисляет SHA-256 хеш байтового массива в шестнадцатеричном формате (hex)
@@ -354,7 +435,11 @@ pub async fn fetch_body(
     let started = std::time::Instant::now();
     let mut res = tokio::time::timeout(
         limits.response,
-        client.get(url).header("User-Agent", "xkeen-route").send(),
+        client
+            .get(url)
+            .header("User-Agent", "xkeen-route")
+            .timeout(limits.total)
+            .send(),
     )
     .await
     .map_err(|_| format!("сервер не ответил за {} с", limits.response.as_secs()))?
@@ -385,6 +470,9 @@ pub async fn fetch_body(
                     body.len()
                 ))
             }
+            Ok(Err(e)) if started.elapsed() >= limits.total || e.is_timeout() => {
+                return Err(over_total(body.len()));
+            }
             Ok(Err(e)) => return Err(format!("ошибка чтения данных: {e}")),
             Ok(Ok(None)) => break,
             Ok(Ok(Some(chunk))) => {
@@ -399,6 +487,209 @@ pub async fn fetch_body(
         }
     }
     Ok(body)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportChannel {
+    Direct,
+    Proxy,
+}
+
+/// Параллельно запускает `direct` и `proxy` запросы и возвращает первый успешный результат
+/// вместе с каналом-победителем. При провале одного канала немедленно дожидается второго.
+async fn race_direct_and_proxy<T, F, Fut>(
+    direct: &reqwest::Client,
+    proxied: Option<&reqwest::Client>,
+    op: F,
+) -> Result<(T, TransportChannel), String>
+where
+    F: Fn(reqwest::Client) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let Some(proxy_client) = proxied else {
+        let res = op(direct.clone()).await?;
+        return Ok((res, TransportChannel::Direct));
+    };
+
+    let direct_fut = std::pin::pin!(op(direct.clone()));
+    let proxy_fut = std::pin::pin!(op(proxy_client.clone()));
+    match futures_util::future::select(direct_fut, proxy_fut).await {
+        futures_util::future::Either::Left((res, second_fut)) => match res {
+            Ok(v) => Ok((v, TransportChannel::Direct)),
+            Err(e1) => match second_fut.await {
+                Ok(v) => Ok((v, TransportChannel::Proxy)),
+                Err(e2) => Err(format!("{e1}; {e2}")),
+            },
+        },
+        futures_util::future::Either::Right((res, second_fut)) => match res {
+            Ok(v) => Ok((v, TransportChannel::Proxy)),
+            Err(e1) => match second_fut.await {
+                Ok(v) => Ok((v, TransportChannel::Direct)),
+                Err(e2) => Err(format!("{e1}; {e2}")),
+            },
+        },
+    }
+}
+
+struct StreamedFileResult {
+    total_bytes: usize,
+    header: [u8; 20],
+    sha256_hex: String,
+}
+
+/// Потоково скачивает файл на диск с контролем response/stall/total таймаутов и вычислением SHA-256.
+async fn stream_url_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    limits: DownloadLimits,
+) -> Result<StreamedFileResult, String> {
+    use tokio::io::AsyncWriteExt;
+
+    let started = std::time::Instant::now();
+    let mut res = tokio::time::timeout(
+        limits.response,
+        client
+            .get(url)
+            .header("User-Agent", "xkeen-route")
+            .timeout(limits.total)
+            .send(),
+    )
+    .await
+    .map_err(|_| format!("сервер не ответил за {} с", limits.response.as_secs()))?
+    .map_err(|e| format!("сетевая ошибка: {e}"))?;
+
+    if !res.status().is_success() {
+        return Err(format!("HTTP статус {}", res.status()));
+    }
+
+    let expected_len = res.content_length();
+    let _ = tokio::fs::remove_file(dest).await;
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| format!("Создание временного файла: {e}"))?;
+
+    let mut total_bytes = 0usize;
+    let mut header = [0u8; 20];
+    let mut header_len = 0usize;
+    let mut hasher = sha2::Sha256::new();
+
+    let cleanup_err = |msg: String, p: &Path| {
+        let p = p.to_path_buf();
+        async move {
+            let _ = tokio::fs::remove_file(&p).await;
+            Err::<StreamedFileResult, String>(msg)
+        }
+    };
+
+    loop {
+        let left = limits.total.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            drop(file);
+            return cleanup_err(
+                format!(
+                    "загрузка не уложилась в {} с (скачано {total_bytes} байт)",
+                    limits.total.as_secs()
+                ),
+                dest,
+            )
+            .await;
+        }
+        match tokio::time::timeout(limits.stall.min(left), res.chunk()).await {
+            Err(_) if started.elapsed() >= limits.total => {
+                drop(file);
+                return cleanup_err(
+                    format!(
+                        "загрузка не уложилась в {} с (скачано {total_bytes} байт)",
+                        limits.total.as_secs()
+                    ),
+                    dest,
+                )
+                .await;
+            }
+            Err(_) => {
+                drop(file);
+                return cleanup_err(
+                    format!("данные перестали приходить (скачано {total_bytes} байт)"),
+                    dest,
+                )
+                .await;
+            }
+            Ok(Err(e)) if started.elapsed() >= limits.total || e.is_timeout() => {
+                drop(file);
+                return cleanup_err(
+                    format!(
+                        "загрузка не уложилась в {} с (скачано {total_bytes} байт)",
+                        limits.total.as_secs()
+                    ),
+                    dest,
+                )
+                .await;
+            }
+            Ok(Err(e)) => {
+                drop(file);
+                return cleanup_err(format!("Загрузка прервана: {e}"), dest).await;
+            }
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(chunk))) => {
+                if header_len < 20 {
+                    let needed = 20 - header_len;
+                    let take = chunk.len().min(needed);
+                    header[header_len..header_len + take].copy_from_slice(&chunk[..take]);
+                    header_len += take;
+                }
+                total_bytes += chunk.len();
+                sha2::Digest::update(&mut hasher, &chunk);
+                if let Err(e) = file.write_all(&chunk).await {
+                    drop(file);
+                    return cleanup_err(format!("Ошибка записи: {e}"), dest).await;
+                }
+            }
+        }
+    }
+
+    if let Err(e) = file.flush().await {
+        drop(file);
+        return cleanup_err(format!("Сброс буфера: {e}"), dest).await;
+    }
+    drop(file);
+
+    if let Some(t) = expected_len {
+        if total_bytes as u64 != t {
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(format!("файл скачан не полностью ({total_bytes} из {t} байт)"));
+        }
+    }
+
+    Ok(StreamedFileResult {
+        total_bytes,
+        header,
+        sha256_hex: hex::encode(sha2::Digest::finalize(hasher)),
+    })
+}
+
+/// Пробует потоково скачать `url` по списку клиентов; при обрыве посреди тела или stall
+/// очищает staging-файл и немедленно переключается на следующий живой канал.
+async fn stream_url_with_fallback(
+    clients: &[(String, reqwest::Client)],
+    url: &str,
+    dest: &Path,
+    limits: DownloadLimits,
+) -> Result<(StreamedFileResult, String), String> {
+    let mut last_err = String::from("Нет доступных каналов загрузки");
+    for (label, http) in clients {
+        let _ = tokio::fs::remove_file(dest).await;
+        crate::log_i!("[UPDATE] Попытка потоковой загрузки ({label}): {url}");
+        match stream_url_to_file(http, url, dest, limits).await {
+            Ok(res) => return Ok((res, label.clone())),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(dest).await;
+                crate::log_w!("[UPDATE] Ошибка загрузки ({label}): {e}");
+                last_err = format!("{label}: {e}");
+            }
+        }
+    }
+    Err(last_err)
 }
 
 pub async fn download_file_verified_with_progress(
@@ -631,163 +922,235 @@ pub fn is_release_asset_ready(rel: &GhRelease, arch: &str) -> bool {
     })
 }
 
-async fn fetch_latest(
-    direct: &reqwest::Client,
-    proxy_url: &str,
+async fn fetch_latest_via_client(
+    http: &reqwest::Client,
     include_beta: bool,
-) -> Result<GhRelease, String> {
-    let proxied = proxied_client(proxy_url);
-    let mut clients = Vec::new();
-    if let Some(ref p) = proxied {
-        clients.push(p);
-    }
-    clients.push(direct);
-
+) -> Result<GhRelease, (String, bool)> {
     let mut rate_limited = false;
-
-    for http in clients {
-        if include_beta {
-            // Для beta-канала запрашиваем список релизов (включая pre-release) и выбираем макс. версию
-            if let Ok(res) = http
+    if include_beta {
+        // Для beta-канала гоняем GitHub API и Atom feed параллельно — не ждём зависания одного из них
+        let api_fut = async {
+            let res = http
                 .get(GITHUB_RELEASES)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(8))
+                .timeout(Duration::from_secs(5))
                 .send()
                 .await
-            {
-                if res.status() == reqwest::StatusCode::FORBIDDEN
-                    || res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    rate_limited = true;
-                    continue;
-                }
-                if res.status().is_success() {
-                    if let Ok(list) = res.json::<Vec<GhRelease>>().await {
-                        if let Some(mut rel) = select_best_release(list, true) {
-                            if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
-                                rel.body = fetch_notes(http, &rel.tag_name).await;
-                            }
-                            return Ok(rel);
-                        }
-                    }
-                }
-            }
-            // Fallback для beta-канала: GitHub Atom feed (/releases.atom) без rate limit API
-            if let Ok(res) = http
-                .get(GITHUB_RELEASES_ATOM)
-                .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(8))
-                .send()
-                .await
-            {
-                if res.status().is_success() {
-                    if let Ok(xml) = res.text().await {
-                        if let Some(tag) = parse_releases_atom_tags(&xml)
-                            .into_iter()
-                            .max_by(|a, b| version_tuple(a).cmp(&version_tuple(b)))
-                        {
-                            let notes = if is_newer(&tag, VERSION) {
-                                fetch_notes(http, &tag).await
-                            } else {
-                                String::new()
-                            };
-                            return Ok(GhRelease {
-                                tag_name: tag,
-                                body: notes,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-            }
-            // На beta-канале не падаем молча на stable-редирект/jsDelivr
-            continue;
-        }
-
-        // 1. Быстрый редирект GitHub releases/latest (без лимитов API, мгновенно)
-        if let Ok(res) = http
-            .get(GITHUB_LATEST)
-            .timeout(Duration::from_secs(6))
-            .send()
-            .await
-        {
-            let final_url = res.url().to_string();
-            if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
-                let tag = tag.trim_matches('/').to_string();
-                if !tag.is_empty() {
-                    let notes = if is_newer(&tag, VERSION) {
-                        fetch_notes(http, &tag).await
-                    } else {
-                        String::new()
-                    };
-                    return Ok(GhRelease {
-                        tag_name: tag,
-                        body: notes,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-
-        // 2. jsDelivr CDN
-        if let Ok(res) = http
-            .get(JSDELIVR_RESOLVED)
-            .timeout(Duration::from_secs(8))
-            .send()
-            .await
-        {
-            if res.status().is_success() {
-                if let Ok(r) = res.json::<JsDelivrResolved>().await {
-                    let tag = format!("v{}", r.version.trim_start_matches('v'));
-                    let notes = if is_newer(&tag, VERSION) {
-                        fetch_notes(http, &tag).await
-                    } else {
-                        String::new()
-                    };
-                    return Ok(GhRelease {
-                        tag_name: tag,
-                        body: notes,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-
-        // 3. GitHub REST API (список релизов — строго без draft и prerelease для stable)
-        if let Ok(res) = http
-            .get(GITHUB_RELEASES)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(8))
-            .send()
-            .await
-        {
+                .map_err(|e| (e.to_string(), false))?;
             if res.status() == reqwest::StatusCode::FORBIDDEN
                 || res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
             {
-                rate_limited = true;
-                continue;
+                return Err(("rate_limit".to_string(), true));
             }
-            if res.status().is_success() {
-                if let Ok(list) = res.json::<Vec<GhRelease>>().await {
-                    if let Some(mut rel) = select_best_release(list, false) {
-                        if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
-                            rel.body = fetch_notes(http, &rel.tag_name).await;
-                        }
-                        return Ok(rel);
+            if !res.status().is_success() {
+                return Err((format!("HTTP {}", res.status()), false));
+            }
+            let list = res
+                .json::<Vec<GhRelease>>()
+                .await
+                .map_err(|e| (e.to_string(), false))?;
+            let mut rel = select_best_release(list, true)
+                .ok_or_else(|| ("empty".to_string(), false))?;
+            if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
+                rel.body = fetch_notes(http, &rel.tag_name).await;
+            }
+            Ok::<GhRelease, (String, bool)>(rel)
+        };
+        let atom_fut = async {
+            let res = http
+                .get(GITHUB_RELEASES_ATOM)
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| (e.to_string(), false))?;
+            if !res.status().is_success() {
+                return Err((format!("HTTP {}", res.status()), false));
+            }
+            let xml = res.text().await.map_err(|e| (e.to_string(), false))?;
+            let tag = parse_releases_atom_tags(&xml)
+                .into_iter()
+                .max_by(|a, b| version_tuple(a).cmp(&version_tuple(b)))
+                .ok_or_else(|| ("no atom tags".to_string(), false))?;
+            let notes = if is_newer(&tag, VERSION) {
+                fetch_notes(http, &tag).await
+            } else {
+                String::new()
+            };
+            Ok::<GhRelease, (String, bool)>(GhRelease {
+                tag_name: tag,
+                body: notes,
+                ..Default::default()
+            })
+        };
+        let api_p = std::pin::pin!(api_fut);
+        let atom_p = std::pin::pin!(atom_fut);
+        match futures_util::future::select(api_p, atom_p).await {
+            futures_util::future::Either::Left((Ok(rel), _)) => return Ok(rel),
+            futures_util::future::Either::Left((Err((_, rl)), second)) => {
+                rate_limited |= rl;
+                match second.await {
+                    Ok(rel) => return Ok(rel),
+                    Err((_, rl2)) => rate_limited |= rl2,
+                }
+            }
+            futures_util::future::Either::Right((Ok(rel), _)) => return Ok(rel),
+            futures_util::future::Either::Right((Err((_, rl)), first)) => {
+                rate_limited |= rl;
+                match first.await {
+                    Ok(rel) => return Ok(rel),
+                    Err((_, rl2)) => rate_limited |= rl2,
+                }
+            }
+        }
+        return Err(("GitHub API недоступен для проверки beta-релизов".into(), rate_limited));
+    }
+
+    // Для stable: параллельно гоняем быстрый редирект GitHub releases/latest и jsDelivr CDN
+    let latest_fut = async {
+        let res = http
+            .get(GITHUB_LATEST)
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let final_url = res.url().to_string();
+        let tag = final_url
+            .split("/releases/tag/")
+            .nth(1)
+            .map(|t| t.trim_matches('/').to_string())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| "no tag".to_string())?;
+        let notes = if is_newer(&tag, VERSION) {
+            fetch_notes(http, &tag).await
+        } else {
+            String::new()
+        };
+        Ok::<GhRelease, String>(GhRelease {
+            tag_name: tag,
+            body: notes,
+            ..Default::default()
+        })
+    };
+    let jsd_fut = async {
+        let res = http
+            .get(JSDELIVR_RESOLVED)
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {}", res.status()));
+        }
+        let r = res.json::<JsDelivrResolved>().await.map_err(|e| e.to_string())?;
+        let tag = format!("v{}", r.version.trim_start_matches('v'));
+        let notes = if is_newer(&tag, VERSION) {
+            fetch_notes(http, &tag).await
+        } else {
+            String::new()
+        };
+        Ok::<GhRelease, String>(GhRelease {
+            tag_name: tag,
+            body: notes,
+            ..Default::default()
+        })
+    };
+    let latest_p = std::pin::pin!(latest_fut);
+    let jsd_p = std::pin::pin!(jsd_fut);
+    match futures_util::future::select(latest_p, jsd_p).await {
+        futures_util::future::Either::Left((Ok(rel), _)) => return Ok(rel),
+        futures_util::future::Either::Left((Err(_), second)) => {
+            if let Ok(rel) = second.await {
+                return Ok(rel);
+            }
+        }
+        futures_util::future::Either::Right((Ok(rel), _)) => return Ok(rel),
+        futures_util::future::Either::Right((Err(_), first)) => {
+            if let Ok(rel) = first.await {
+                return Ok(rel);
+            }
+        }
+    }
+
+    // 3. GitHub REST API (список релизов — строго без draft и prerelease для stable)
+    if let Ok(res) = http
+        .get(GITHUB_RELEASES)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "xkeen-route")
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await
+    {
+        if res.status() == reqwest::StatusCode::FORBIDDEN
+            || res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            rate_limited = true;
+        } else if res.status().is_success() {
+            if let Ok(list) = res.json::<Vec<GhRelease>>().await {
+                if let Some(mut rel) = select_best_release(list, false) {
+                    if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
+                        rel.body = fetch_notes(http, &rel.tag_name).await;
                     }
+                    return Ok(rel);
                 }
             }
         }
     }
-    if rate_limited {
-        Err("Превышен лимит запросов GitHub API (403 Rate Limit). Попробуйте позже.".into())
-    } else if include_beta {
-        Err("GitHub API недоступен для проверки beta-релизов".into())
-    } else {
-        Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into())
+
+    Err((
+        "GitHub и jsDelivr недоступны (напрямую и через прокси)".into(),
+        rate_limited,
+    ))
+}
+
+async fn fetch_latest_with_channel(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+    include_beta: bool,
+) -> Result<(GhRelease, String), String> {
+    let candidates = build_transport_candidates(direct, proxy_url, wan_ips);
+    let rate_limited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rl_flag = rate_limited.clone();
+
+    let res = race_candidates(candidates, move |http| {
+        let rl = rl_flag.clone();
+        async move {
+            match fetch_latest_via_client(&http, include_beta).await {
+                Ok(rel) => Ok(rel),
+                Err((msg, was_rl)) => {
+                    if was_rl {
+                        rl.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(msg)
+                }
+            }
+        }
+    })
+    .await;
+
+    match res {
+        Ok(ok) => Ok(ok),
+        Err(_) if rate_limited.load(std::sync::atomic::Ordering::Relaxed) => {
+            Err("Превышен лимит запросов GitHub API (403 Rate Limit). Попробуйте позже.".into())
+        }
+        Err(_) if include_beta => {
+            Err("GitHub API недоступен для проверки beta-релизов".into())
+        }
+        Err(_) => Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into()),
     }
+}
+
+async fn fetch_latest(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+    include_beta: bool,
+) -> Result<GhRelease, String> {
+    fetch_latest_with_channel(direct, proxy_url, wan_ips, include_beta)
+        .await
+        .map(|(rel, _)| rel)
 }
 
 /// Кэшированное получение последнего релиза (раздельный кэш для stable и beta, singleflight и negative cache).
@@ -795,6 +1158,7 @@ async fn fetch_latest(
 async fn get_latest_cached(
     http: &reqwest::Client,
     proxy_url: &str,
+    wan_ips: &[String],
     include_beta: bool,
     force: bool,
 ) -> Result<(GhRelease, Option<String>), String> {
@@ -857,7 +1221,7 @@ async fn get_latest_cached(
         }
     }
 
-    match fetch_latest(http, proxy_url, include_beta).await {
+    match fetch_latest(http, proxy_url, wan_ips, include_beta).await {
         Ok(fresh) => {
             *err_mutex.lock().await = None;
             let mut guard = cache_mutex.lock().await;
@@ -906,11 +1270,13 @@ pub async fn check_update_info_with_channel_force(
     force: bool,
 ) -> (String, String, bool, Vec<String>, bool, Option<String>) {
     let proxy_url = {
-        let cfg = state.config.read().await;
+        let cfg = state.cfg_snapshot().await;
         cfg.mihomo_proxy_url()
     };
+    let wan_ips = state.multiwan.live_wan_ips().await;
     let current_tag = format!("v{}", VERSION.trim_start_matches('v'));
-    let (rel, cache_warning) = match get_latest_cached(&state.http, &proxy_url, include_beta, force).await {
+    let (rel, cache_warning) =
+        match get_latest_cached(&state.http, &proxy_url, &wan_ips, include_beta, force).await {
         Ok(r) => r,
         Err(err) => {
             let fallback_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
@@ -1239,13 +1605,15 @@ pub async fn install(
     }
 
     let proxy_url = {
-        let cfg = state.config.read().await;
+        let cfg = state.cfg_snapshot().await;
         cfg.mihomo_proxy_url()
     };
-    let rel = match fetch_latest(&state.http, &proxy_url, include_beta).await {
-        Ok(r) => r,
-        Err(e) => return api_err(e),
-    };
+    let wan_ips = state.multiwan.live_wan_ips().await;
+    let (rel, winning_channel) =
+        match fetch_latest_with_channel(&state.http, &proxy_url, &wan_ips, include_beta).await {
+            Ok(r) => r,
+            Err(e) => return api_err(e),
+        };
     let ver = rel.tag_name.clone();
     if let Some(ref target) = req.target_version {
         if ver.trim_start_matches('v') != target.trim_start_matches('v') {
@@ -1264,104 +1632,63 @@ pub async fn install(
         return api_err(format!("Архитектура {arch} не поддерживается автообновлением"));
     }
 
-    let proxied = proxied_client(&proxy_url);
-    let mut download_clients: Vec<&reqwest::Client> = Vec::new();
-    if let Some(ref p) = proxied {
-        download_clients.push(p);
-    }
-    download_clients.push(&state.http);
-
-    let mut download_res = None;
-    let mut chosen_asset = "";
-    'outer: for http in &download_clients {
-        for asset in &asset_candidates {
-            let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
-            crate::log_i!("[UPDATE] Попытка загрузки {url}");
-            match http
-                .get(&url)
-                .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(300))
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => {
-                    download_res = Some(r);
-                    chosen_asset = asset;
-                    break 'outer;
-                }
-                Ok(r) => {
-                    crate::log_w!("[UPDATE] Ресурс {asset} вернул статус {}", r.status());
-                }
-                Err(e) => {
-                    crate::log_w!("[UPDATE] Ошибка запроса {asset}: {e}");
-                }
-            }
-        }
-    }
-
-    let mut res = match download_res {
-        Some(r) => r,
-        None => return api_err(format!("Не удалось загрузить бинарник обновления для архитектуры {arch}")),
-    };
+    let mut all_candidates = build_transport_candidates(&state.http, &proxy_url, &wan_ips);
+    // Победивший в гонке канал ставим первым, остальные живые WAN/direct/proxy — следом
+    all_candidates.sort_by_key(|c| if c.label == winning_channel { 0 } else { 1 });
+    let download_clients: Vec<(String, reqwest::Client)> = all_candidates
+        .into_iter()
+        .map(|c| (c.label, c.client))
+        .collect();
 
     let tmp_dir = Path::new("/opt/tmp");
     let _ = tokio::fs::create_dir_all(tmp_dir).await;
     let tmp = tmp_dir.join(format!("xkeen-route.{}.staging", std::process::id()));
 
-    use tokio::io::AsyncWriteExt;
-    let mut file = match tokio::fs::File::create(&tmp).await {
-        Ok(f) => f,
-        Err(e) => return api_err(format!("Создание временного файла: {e}")),
+    let limits = DownloadLimits {
+        response: Duration::from_secs(20),
+        stall: Duration::from_secs(20),
+        total: Duration::from_secs(600),
     };
 
-    let mut total_bytes = 0usize;
-    let mut header = [0u8; 20];
-    let mut header_len = 0usize;
-    let mut hasher = sha2::Sha256::new();
-
-    loop {
-        match res.chunk().await {
-            Ok(Some(chunk)) => {
-                if header_len < 20 {
-                    let needed = 20 - header_len;
-                    let take = chunk.len().min(needed);
-                    header[header_len..header_len + take].copy_from_slice(&chunk[..take]);
-                    header_len += take;
-                }
-                total_bytes += chunk.len();
-                sha2::Digest::update(&mut hasher, &chunk);
-                if let Err(e) = file.write_all(&chunk).await {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return api_err(format!("Ошибка записи: {e}"));
-                }
+    let mut streamed_res = None;
+    let mut chosen_asset = "";
+    for asset in &asset_candidates {
+        let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
+        crate::log_i!("[UPDATE] Попытка загрузки (winner={winning_channel}): {url}");
+        match stream_url_with_fallback(&download_clients, &url, &tmp, limits).await {
+            Ok((res, used_label)) => {
+                crate::log_i!("[UPDATE] Загрузка {asset} завершена через {used_label} ({} байт)", res.total_bytes);
+                streamed_res = Some(res);
+                chosen_asset = asset;
+                break;
             }
-            Ok(None) => break,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return api_err(format!("Загрузка прервана: {e}"));
+                crate::log_w!("[UPDATE] Ошибка загрузки {asset}: {e}");
             }
         }
     }
 
-    if let Err(e) = file.flush().await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err(format!("Сброс буфера: {e}"));
-    }
-    drop(file);
+    let StreamedFileResult {
+        total_bytes,
+        header,
+        sha256_hex: calculated_sha256,
+    } = match streamed_res {
+        Some(r) => r,
+        None => return api_err(format!("Не удалось загрузить бинарник обновления для архитектуры {arch}")),
+    };
 
     // Верификация контрольной суммы SHA-256 ДО исполнения/замены (SEC-01 / U-01).
     // Источники ожидаемого хеша: 1) checksum-текст в описании релиза, 2) файл
     // <asset>.sha256 из релиза (публикуется workflow). Совпадение — обязательное;
     // при отсутствии обоих источников апдейт идёт с явным предупреждением в лог.
-    let calculated_sha256 = hex::encode(sha2::Digest::finalize(hasher));
     let mut expected_sha = extract_hash_from_checksum_text(&rel.body, chosen_asset);
     if expected_sha.is_none() {
         let sums_url = format!("{GITHUB_RELEASE}/{ver}/{chosen_asset}.sha256");
-        for http in &download_clients {
+        for (_chan_label, http) in &download_clients {
             match http
                 .get(&sums_url)
                 .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(20))
+                .timeout(Duration::from_secs(10))
                 .send()
                 .await
             {
@@ -1686,36 +2013,43 @@ pub fn find_mihomo_asset<'a>(assets: &'a [MihomoReleaseAsset], arch: &str) -> Op
     }
 }
 
-async fn fetch_mihomo_releases(direct: &reqwest::Client, proxy_url: &str) -> Result<Vec<MihomoRelease>, String> {
-    let proxied = proxied_client(proxy_url);
-    let mut clients = Vec::new();
-    if let Some(ref p) = proxied {
-        clients.push(p);
-    }
-    clients.push(direct);
-
-    for http in &clients {
-        if let Ok(res) = http
+async fn fetch_mihomo_releases(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+) -> Result<Vec<MihomoRelease>, String> {
+    let candidates = build_transport_candidates(direct, proxy_url, wan_ips);
+    race_candidates(candidates, |http| async move {
+        let res = http
             .get(MIHOMO_REPO_RELEASES)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(10))
             .send()
             .await
-        {
-            if res.status().is_success() {
-                if let Ok(list) = res.json::<Vec<MihomoRelease>>().await {
-                    if !list.is_empty() {
-                        return Ok(list);
-                    }
-                }
-            }
+            .map_err(|e| format!("сетевая ошибка: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP статус {}", res.status()));
         }
-    }
-    Err("Не удалось получить список релизов Mihomo с GitHub".into())
+        let list = res
+            .json::<Vec<MihomoRelease>>()
+            .await
+            .map_err(|e| format!("JSON ошибка: {e}"))?;
+        if list.is_empty() {
+            return Err("Пустой список релизов Mihomo".into());
+        }
+        Ok(list)
+    })
+    .await
+    .map(|(list, _)| list)
+    .map_err(|_| "Не удалось получить список релизов Mihomo с GitHub".into())
 }
 
-async fn fetch_mihomo_releases_cached(direct: &reqwest::Client, proxy_url: &str) -> Result<Vec<MihomoRelease>, String> {
+async fn fetch_mihomo_releases_cached(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+) -> Result<Vec<MihomoRelease>, String> {
     let ttl = Duration::from_secs(MIHOMO_RELEASES_TTL_SECS);
     let neg_ttl = Duration::from_secs(MIHOMO_RELEASES_NEG_TTL_SECS);
 
@@ -1750,7 +2084,7 @@ async fn fetch_mihomo_releases_cached(direct: &reqwest::Client, proxy_url: &str)
         }
     }
 
-    match fetch_mihomo_releases(direct, proxy_url).await {
+    match fetch_mihomo_releases(direct, proxy_url, wan_ips).await {
         Ok(fresh) => {
             *MIHOMO_RELEASES_ERR.lock().await = None;
             let mut guard = MIHOMO_RELEASES_CACHE.lock().await;
@@ -1769,7 +2103,11 @@ async fn fetch_mihomo_releases_cached(direct: &reqwest::Client, proxy_url: &str)
     }
 }
 
-async fn fetch_mihomo_latest_light_cached(direct: &reqwest::Client, proxy_url: &str) -> Result<String, String> {
+async fn fetch_mihomo_latest_light_cached(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    wan_ips: &[String],
+) -> Result<String, String> {
     let ttl = Duration::from_secs(MIHOMO_RELEASES_TTL_SECS);
     let neg_ttl = Duration::from_secs(MIHOMO_RELEASES_NEG_TTL_SECS);
 
@@ -1814,31 +2152,29 @@ async fn fetch_mihomo_latest_light_cached(direct: &reqwest::Client, proxy_url: &
         }
     }
 
-    let proxied = proxied_client(proxy_url);
-    let mut clients = Vec::new();
-    if let Some(ref p) = proxied {
-        clients.push(p);
-    }
-    clients.push(direct);
-
-    for http in &clients {
-        if let Ok(res) = http
+    let candidates = build_transport_candidates(direct, proxy_url, wan_ips);
+    if let Ok((tag, _)) = race_candidates(candidates, |http| async move {
+        let res = http
             .get(MIHOMO_LATEST_REDIRECT)
             .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(5))
             .send()
             .await
-        {
-            let final_url = res.url().to_string();
-            if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
-                let tag = tag.trim_matches('/').to_string();
-                if !tag.is_empty() {
-                    *MIHOMO_LIGHT_ERR.lock().await = None;
-                    *MIHOMO_LIGHT_CACHE.lock().await = Some((std::time::Instant::now(), tag.clone()));
-                    return Ok(tag);
-                }
+            .map_err(|e| format!("сетевая ошибка: {e}"))?;
+        let final_url = res.url().to_string();
+        if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
+            let tag = tag.trim_matches('/').to_string();
+            if !tag.is_empty() {
+                return Ok(tag);
             }
         }
+        Err("Тег релиза не найден".into())
+    })
+    .await
+    {
+        *MIHOMO_LIGHT_ERR.lock().await = None;
+        *MIHOMO_LIGHT_CACHE.lock().await = Some((std::time::Instant::now(), tag.clone()));
+        return Ok(tag);
     }
 
     let err_msg = "Не удалось получить последнюю версию Mihomo".to_string();
@@ -1870,6 +2206,7 @@ pub async fn mihomo_releases(
 ) -> Response {
     let cfg = state.cfg_snapshot().await;
     let proxy_url = cfg.mihomo_proxy_url();
+    let wan_ips = state.multiwan.live_wan_ips().await;
     let arch = detect_mihomo_arch().await;
 
     // Определяем текущую установленную версию Mihomo (не спавним бинарник, если есть свежий кэш)
@@ -1919,7 +2256,7 @@ pub async fn mihomo_releases(
     let (current_ver, full_ver) = (initial_ver.clone(), initial_ver);
 
     if query.is_light() {
-        let latest_version = fetch_mihomo_latest_light_cached(&state.http, &proxy_url)
+        let latest_version = fetch_mihomo_latest_light_cached(&state.http, &proxy_url, &wan_ips)
             .await
             .unwrap_or_default();
         return api_ok(json!({
@@ -1931,7 +2268,7 @@ pub async fn mihomo_releases(
         }));
     }
 
-    let raw_releases = match fetch_mihomo_releases_cached(&state.http, &proxy_url).await {
+    let raw_releases = match fetch_mihomo_releases_cached(&state.http, &proxy_url, &wan_ips).await {
         Ok(r) => r,
         Err(e) => return api_err(e),
     };
@@ -2046,7 +2383,9 @@ pub async fn mihomo_install(
     }
     let mut expected_sha256: Option<String> = None;
 
-    let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
+    let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url, &[])
+        .await
+        .unwrap_or_default();
     let matched_rel = rels.iter()
         .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'));
 
@@ -2103,7 +2442,7 @@ pub async fn mihomo_install(
             let send_fut = http
                 .get(url)
                 .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(90))
+                .timeout(Duration::from_secs(600))
                 .send();
 
             let mut res = match tokio::time::timeout(Duration::from_secs(12), send_fut).await {
@@ -2902,5 +3241,319 @@ mod tests {
         let q2: axum::extract::Query<MihomoReleasesQuery> =
             axum::extract::Query::try_from_uri(&"http://localhost/api/mihomo/releases?light=true".parse::<axum::http::Uri>().unwrap()).unwrap();
         assert!(q2.0.is_light());
+    }
+
+    #[tokio::test]
+    async fn regression_race_direct_and_proxy_returns_fastest_healthy_channel() {
+        use axum::{routing::get, Router};
+
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_listener.local_addr().unwrap();
+        let slow_app = Router::new().route(
+            "/ping",
+            get(|| async {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                "slow"
+            }),
+        );
+        let slow_srv = tokio::spawn(async move {
+            axum::serve(slow_listener, slow_app).await.ok();
+        });
+
+        let fast_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fast_addr = fast_listener.local_addr().unwrap();
+        let fast_app = Router::new().route("/ping", get(|| async { "fast" }));
+        let fast_srv = tokio::spawn(async move {
+            axum::serve(fast_listener, fast_app).await.ok();
+        });
+
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let slow_url = format!("http://{slow_addr}/ping");
+        let fast_url = format!("http://{fast_addr}/ping");
+
+        // Симулируем direct=slow, proxy=fast (через параметр клиента не требуется прокси для теста гонки)
+        let (val, chan) = race_direct_and_proxy(&client, Some(&client), |http| {
+            let su = slow_url.clone();
+            let fu = fast_url.clone();
+            // Первый вызов в race_direct_and_proxy — direct, второй — proxy
+            static CALL_IDX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let idx = CALL_IDX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                let url = if idx % 2 == 0 { su } else { fu };
+                let txt = http
+                    .get(&url)
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .text()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(txt)
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(val, "fast");
+        assert_eq!(chan, TransportChannel::Proxy);
+        assert!(started.elapsed() < Duration::from_millis(500), "Гонка не должна ждать медленный канал");
+
+        slow_srv.abort();
+        fast_srv.abort();
+    }
+
+    #[tokio::test]
+    async fn regression_stream_url_to_file_succeeds_past_client_20s_timeout_and_detects_stall() {
+        use axum::{routing::get, Router};
+        use futures_util::stream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/slow-ok",
+                get(|| async {
+                    let s = stream::unfold(0u8, |step| async move {
+                        if step >= 4 {
+                            return None;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"chunk")), step + 1))
+                    });
+                    axum::body::Body::from_stream(s)
+                }),
+            )
+            .route(
+                "/stalled",
+                get(|| async {
+                    let s = stream::unfold(0u8, |step| async move {
+                        if step == 0 {
+                            Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"head")), 1))
+                        } else {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            None
+                        }
+                    });
+                    axum::body::Body::from_stream(s)
+                }),
+            );
+        let srv = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        // Клиент с коротким общим timeout(400ms), но stream_url_to_file переопределяет .timeout(limits.total)
+        let short_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(400))
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("xkeen_updater_stream_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let ok_path = dir.join("ok.bin");
+        let stall_path = dir.join("stall.bin");
+
+        let res = stream_url_to_file(
+            &short_client,
+            &format!("http://{addr}/slow-ok"),
+            &ok_path,
+            DownloadLimits {
+                response: Duration::from_secs(2),
+                stall: Duration::from_secs(2),
+                total: Duration::from_secs(5),
+            },
+        )
+        .await
+        .expect("stream_url_to_file должен перекрывать клиентский timeout(400ms) через limits.total");
+        assert_eq!(res.total_bytes, 20);
+        assert!(ok_path.exists());
+
+        let err = stream_url_to_file(
+            &short_client,
+            &format!("http://{addr}/stalled"),
+            &stall_path,
+            DownloadLimits {
+                response: Duration::from_secs(2),
+                stall: Duration::from_millis(300),
+                total: Duration::from_secs(5),
+            },
+        )
+        .await
+        .err()
+        .expect("зависший поток должен отвалиться по stall-таймауту");
+        assert!(err.contains("данные перестали приходить"), "unexpected err: {err}");
+        assert!(!stall_path.exists(), "при stall временный файл должен удаляться");
+
+        srv.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_updater_uses_stream_download_and_parallel_race() {
+        let src = include_str!("updater.rs");
+        let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(prod.contains("race_candidates("), "updater.rs должен гонять кандидатов параллельно");
+        assert!(prod.contains("stream_url_with_fallback("), "install() должен качать бинарник через stream_url_with_fallback");
+        assert!(prod.contains(".timeout(limits.total)"), "stream/fetch_body должны перекрывать 20s таймаут state.http");
+    }
+
+    #[tokio::test]
+    async fn regression_updater_mid_body_drop_fails_over_to_second_channel_and_verifies_sha256() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let payload = vec![b'A'; 4096];
+        let expected_sha = compute_sha256(&payload);
+
+        // Сервер 1: отдаёт 200 OK + Content-Length: 4096 + первые 512 байт, затем рвёт TCP-соединение посреди тела
+        let drop_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let drop_addr = drop_listener.local_addr().unwrap();
+        let drop_srv = tokio::spawn(async move {
+            let (mut sock, _) = drop_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 4096);
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&vec![b'A'; 512]).await;
+            let _ = sock.shutdown().await;
+            drop(sock);
+        });
+
+        // Сервер 2: отдаёт полный файл 4096 байт
+        let ok_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ok_addr = ok_listener.local_addr().unwrap();
+        let payload_c = payload.clone();
+        let ok_srv = tokio::spawn(async move {
+            let (mut sock, _) = ok_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload_c.len());
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&payload_c).await;
+            let _ = sock.shutdown().await;
+        });
+
+        // Используем локальный реверс-прокси? Проще: проверяем stream_url_with_fallback с двумя URL через
+        // двух локальных клиентов нельзя подменить URL, поэтому тестируем через HTTP-прокси на drop_addr/ok_addr
+        // или через два последовательных URL: первый падает, второй качает целиком в тот же staging-файл.
+        let dir = std::env::temp_dir().join(format!("xkeen_mid_drop_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let staging = dir.join("xkeen-route.staging");
+        let client = plain_client();
+
+        let err = stream_url_to_file(
+            &client,
+            &format!("http://{drop_addr}/bin"),
+            &staging,
+            DownloadLimits {
+                response: Duration::from_secs(2),
+                stall: Duration::from_secs(2),
+                total: Duration::from_secs(5),
+            },
+        )
+        .await
+        .err()
+        .expect("обрыв посреди тела должен возвращать ошибку");
+        assert!(
+            err.contains("не полностью") || err.contains("Загрузка прервана"),
+            "unexpected err: {err}"
+        );
+        assert!(!staging.exists(), "при обрыве посреди тела staging-файл должен удаляться");
+
+        // Фоллбэк через stream_url_with_fallback (первый клиент с нерабочим портом, второй живой)
+        let dead_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http("http://127.0.0.1:1").unwrap())
+            .connect_timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let clients = vec![
+            ("wan:192.168.10.22".to_string(), dead_client),
+            ("wan:192.168.2.52".to_string(), client),
+        ];
+        let (res, winner) = stream_url_with_fallback(
+            &clients,
+            &format!("http://{ok_addr}/bin"),
+            &staging,
+            DownloadLimits {
+                response: Duration::from_secs(2),
+                stall: Duration::from_secs(2),
+                total: Duration::from_secs(5),
+            },
+        )
+        .await
+        .expect("второй канал должен докачать файл");
+        assert_eq!(winner, "wan:192.168.2.52");
+        assert_eq!(res.total_bytes, 4096);
+        assert!(verify_release_checksum(&res.sha256_hex, Some(&expected_sha)).is_ok());
+        assert!(staging.exists());
+
+        drop_srv.abort();
+        ok_srv.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regression_race_candidates_cancels_slow_wan_and_returns_fastest() {
+        use axum::{routing::get, Router};
+
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_listener.local_addr().unwrap();
+        let slow_srv = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/check",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    "slow"
+                }),
+            );
+            axum::serve(slow_listener, app).await.ok();
+        });
+
+        let fast_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fast_addr = fast_listener.local_addr().unwrap();
+        let fast_srv = tokio::spawn(async move {
+            let app = Router::new().route("/check", get(|| async { "fast" }));
+            axum::serve(fast_listener, app).await.ok();
+        });
+
+        let c = plain_client();
+        let candidates = vec![
+            TransportCandidate { label: "wan:apcli0".into(), client: c.clone() },
+            TransportCandidate { label: "wan:apcli1".into(), client: c.clone() },
+            TransportCandidate { label: "direct".into(), client: c },
+        ];
+        let idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slow_url = format!("http://{slow_addr}/check");
+        let fast_url = format!("http://{fast_addr}/check");
+
+        let started = std::time::Instant::now();
+        let (val, winner) = race_candidates(candidates, move |http| {
+            let i = idx.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let su = slow_url.clone();
+            let fu = fast_url.clone();
+            async move {
+                if i == 0 {
+                    return Err("wan0 timeout".to_string());
+                }
+                let url = if i == 1 { fu } else { su };
+                http.get(url)
+                    .timeout(Duration::from_secs(4))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .text()
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(val, "fast");
+        assert_eq!(winner, "wan:apcli1");
+        assert!(started.elapsed() < Duration::from_millis(600), "Гонка должна завершаться мгновенно по самому быстрому WAN");
+
+        slow_srv.abort();
+        fast_srv.abort();
     }
 }

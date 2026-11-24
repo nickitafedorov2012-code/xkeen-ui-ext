@@ -1258,6 +1258,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let app = axum::Router::new()

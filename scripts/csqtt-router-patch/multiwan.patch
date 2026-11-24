@@ -1,0 +1,1526 @@
+diff --git a/rust-client/Cargo.lock b/rust-client/Cargo.lock
+index 88b35ba..cc02784 100644
+--- a/rust-client/Cargo.lock
++++ b/rust-client/Cargo.lock
+@@ -199,16 +199,6 @@ dependencies = [
+  "alloc-stdlib",
+ ]
+ 
+-[[package]]
+-name = "bstr"
+-version = "1.13.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+-dependencies = [
+- "memchr",
+- "serde_core",
+-]
+-
+ [[package]]
+ name = "bumpalo"
+ version = "3.20.3"
+@@ -518,7 +508,6 @@ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.23.1",
+- "mlua",
+  "rusqlite",
+  "serde_json",
+  "tempfile",
+@@ -666,18 +655,6 @@ version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+ 
+-[[package]]
+-name = "either"
+-version = "1.19.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+-
+-[[package]]
+-name = "env_home"
+-version = "0.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
+-
+ [[package]]
+ name = "equivalent"
+ version = "1.0.2"
+@@ -1238,25 +1215,6 @@ version = "0.1.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+ 
+-[[package]]
+-name = "lua-src"
+-version = "547.0.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1edaf29e3517b49b8b746701e5648ccb5785cde1c119062cbabbc5d5cd115e42"
+-dependencies = [
+- "cc",
+-]
+-
+-[[package]]
+-name = "luajit-src"
+-version = "210.5.12+a4f56a4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b3a8e7962a5368d5f264d045a5a255e90f9aa3fc1941ae15a8d2940d42cac671"
+-dependencies = [
+- "cc",
+- "which",
+-]
+-
+ [[package]]
+ name = "managed"
+ version = "0.8.0"
+@@ -1309,34 +1267,6 @@ dependencies = [
+  "windows-sys 0.61.2",
+ ]
+ 
+-[[package]]
+-name = "mlua"
+-version = "0.10.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c1f5f8fbebc7db5f671671134b9321c4b9aa9adeafccfd9a8c020ae45c6a35d0"
+-dependencies = [
+- "bstr",
+- "either",
+- "mlua-sys",
+- "num-traits",
+- "parking_lot",
+- "rustc-hash",
+- "rustversion",
+-]
+-
+-[[package]]
+-name = "mlua-sys"
+-version = "0.6.8"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "380c1f7e2099cafcf40e51d3a9f20a346977587aa4d012eae1f043149a728a93"
+-dependencies = [
+- "cc",
+- "cfg-if",
+- "lua-src",
+- "luajit-src",
+- "pkg-config",
+-]
+-
+ [[package]]
+ name = "moxcms"
+ version = "0.8.1"
+@@ -1401,29 +1331,6 @@ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+ 
+-[[package]]
+-name = "parking_lot"
+-version = "0.12.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+-dependencies = [
+- "lock_api",
+- "parking_lot_core",
+-]
+-
+-[[package]]
+-name = "parking_lot_core"
+-version = "0.9.12"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+-dependencies = [
+- "cfg-if",
+- "libc",
+- "redox_syscall",
+- "smallvec",
+- "windows-link",
+-]
+-
+ [[package]]
+ name = "percent-encoding"
+ version = "2.3.2"
+@@ -1867,15 +1774,6 @@ dependencies = [
+  "yasna",
+ ]
+ 
+-[[package]]
+-name = "redox_syscall"
+-version = "0.5.18"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+-dependencies = [
+- "bitflags 2.13.1",
+-]
+-
+ [[package]]
+ name = "regex-lite"
+ version = "0.1.9"
+@@ -2645,18 +2543,6 @@ dependencies = [
+  "rustls-pki-types",
+ ]
+ 
+-[[package]]
+-name = "which"
+-version = "7.0.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
+-dependencies = [
+- "either",
+- "env_home",
+- "rustix",
+- "winsafe",
+-]
+-
+ [[package]]
+ name = "windows-link"
+ version = "0.2.1"
+@@ -2745,12 +2631,6 @@ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+ 
+-[[package]]
+-name = "winsafe"
+-version = "0.0.19"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
+-
+ [[package]]
+ name = "wit-bindgen"
+ version = "0.57.1"
+diff --git a/rust-client/Cargo.toml b/rust-client/Cargo.toml
+index 18d615e..c5e91c2 100644
+--- a/rust-client/Cargo.toml
++++ b/rust-client/Cargo.toml
+@@ -31,7 +31,7 @@ md-5 = "0.11.0"
+ rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
+ rand = { version = "0.10.2", features = ["sys_rng"] }
+ regex = { package = "regex-lite", version = "0.1.9" }
+-primp = "1.3.1"
++primp = { version = "1.3.1", features = ["socks"] }
+ futures = "0.3"
+ netstack-smoltcp = "0.2.4"
+ serde = { version = "1.0.229", features = ["derive"] }
+diff --git a/rust-client/auth.rs b/rust-client/auth.rs
+index 61467d6..9c193f2 100644
+--- a/rust-client/auth.rs
++++ b/rust-client/auth.rs
+@@ -162,6 +162,21 @@ impl VkAuth {
+             .join(", ")
+     }
+ 
++    pub async fn get_credentials_for_cohort(
++        &self,
++        link: &str,
++        stream_id: usize,
++        cohort_route: Option<(String, Option<std::net::IpAddr>)>,
++    ) -> Result<TurnCredentials> {
++        let mapped = match cohort_route {
++            Some((proxy_url, bind_ip)) => (Some(proxy_url), bind_ip),
++            None => (None, None),
++        };
++        CURRENT_COHORT_ROUTE
++            .scope(mapped, self.get_credentials(link, stream_id))
++            .await
++    }
++
+     pub async fn get_credentials(&self, link: &str, stream_id: usize) -> Result<TurnCredentials> {
+         if self.mode.as_ref() == "auto_js" {
+             let credential_id = stream_id / 100;
+@@ -663,6 +678,10 @@ fn browser_identity(profile: &Profile) -> (Impersonate, ImpersonateOS) {
+     (profile.impersonate, profile.os)
+ }
+ 
++tokio::task_local! {
++    static CURRENT_COHORT_ROUTE: (Option<String>, Option<std::net::IpAddr>);
++}
++
+ fn build_browser_client(
+     cookie_jar: Arc<Jar>,
+     browser: Impersonate,
+@@ -676,6 +695,13 @@ fn build_browser_client(
+         .cookie_provider(cookie_jar)
+         .redirect(primp::redirect::Policy::limited(10))
+         .dns_resolver(dns::global());
++    if let Ok((proxy_url, bind_ip)) = CURRENT_COHORT_ROUTE.try_with(|v| v.clone()) {
++        if let Some(url) = proxy_url {
++            builder = builder.proxy(primp::Proxy::all(&url).context("cohort SO_MARK proxy")?);
++        } else if let Some(ip) = bind_ip {
++            builder = builder.local_address(ip);
++        }
++    }
+     if captcha_order {
+         let pseudo = PseudoOrder::builder()
+             .push(PseudoId::Method)
+diff --git a/rust-client/events.rs b/rust-client/events.rs
+index acff19f..14e8d1b 100644
+--- a/rust-client/events.rs
++++ b/rust-client/events.rs
+@@ -82,12 +82,31 @@ impl Events {
+     }
+ 
+     pub fn stats(&self, active: i32, bytes_up: i64, bytes_down: i64) {
++        self.stats_with_wan(active, bytes_up, bytes_down, &std::collections::BTreeMap::new());
++    }
++
++    pub fn stats_with_wan(
++        &self,
++        active: i32,
++        bytes_up: i64,
++        bytes_down: i64,
++        wan_streams: &std::collections::BTreeMap<String, i32>,
++    ) {
+         self.emit("STATS", || {
+-            serde_json::json!({
+-                "active": active,
+-                "bytes_up": bytes_up,
+-                "bytes_down": bytes_down
+-            })
++            if wan_streams.is_empty() {
++                serde_json::json!({
++                    "active": active,
++                    "bytes_up": bytes_up,
++                    "bytes_down": bytes_down
++                })
++            } else {
++                serde_json::json!({
++                    "active": active,
++                    "bytes_up": bytes_up,
++                    "bytes_down": bytes_down,
++                    "wan_streams": wan_streams
++                })
++            }
+         });
+     }
+ 
+diff --git a/rust-client/main.rs b/rust-client/main.rs
+index 901cebd..01a2f01 100644
+--- a/rust-client/main.rs
++++ b/rust-client/main.rs
+@@ -34,6 +34,7 @@ mod turn_endpoint;
+ mod turn_ip_pool;
+ mod turn_stream;
+ mod vk_js_calls;
++mod wan_marks;
+ #[path = "../shared/wire_protocol.rs"]
+ mod wire_protocol;
+ mod worker;
+@@ -158,6 +159,8 @@ struct Arguments {
+     direct_ips: String,
+     #[arg(long = "exact-workers", default_value_t = false)]
+     exact_workers: bool,
++    #[arg(long = "wan-marks", default_value = "")]
++    wan_marks: String,
+ }
+ 
+ fn main() {
+@@ -400,6 +403,10 @@ async fn run(arguments: Arguments) -> Result<i32> {
+             return Err(error);
+         }
+     };
++    let initial_workers = workers;
++    let scale_notify = Arc::new(tokio::sync::Notify::new());
++    let params_workers = Arc::new(AtomicUsize::new(initial_workers));
++    let wan_router = wan_marks::WanRouter::new(&arguments.wan_marks);
+     let control_task = start_control_input(
+         cancel.clone(),
+         paused.clone(),
+@@ -407,6 +414,9 @@ async fn run(arguments: Arguments) -> Result<i32> {
+         events.clone(),
+         finish_js_calls.clone(),
+         dispatcher.clone(),
++        wan_router.clone(),
++        params_workers.clone(),
++        scale_notify.clone(),
+         stdin,
+     );
+     let local_port: Arc<str> = Arc::from(local_port);
+@@ -419,9 +429,6 @@ async fn run(arguments: Arguments) -> Result<i32> {
+         parse_custom_turn_ips(raw_turn_ips),
+         MAX_WORKERS,
+     ));
+-    let initial_workers = workers;
+-    let scale_notify = Arc::new(tokio::sync::Notify::new());
+-    let params_workers = Arc::new(AtomicUsize::new(initial_workers));
+     let params = Arc::new(RuntimeParams {
+         peer,
+         turn_host: (!arguments.turn.is_empty()).then(|| Arc::from(arguments.turn.as_str())),
+@@ -450,7 +457,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
+         &local_port,
+     );
+     let repair = RepairState::new(MAX_WORKERS);
+-    let stats_task = tokio::spawn(stats.clone().run(events.clone(), cancel.clone()));
++    let stats_task = tokio::spawn(stats.clone().run(events.clone(), wan_router.clone(), cancel.clone()));
+     let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
+     let config_events = events.clone();
+     let config_task = tokio::spawn(async move {
+@@ -496,6 +503,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
+         shutdown: Arc::new(ShutdownCoordinator::new()),
+         cancel: cancel.clone(),
+         scale_notify,
++        wan_router,
+     });
+     let required_ready_bots = required_js_ready_bots(groups);
+     if js_auth_mode {
+@@ -833,6 +841,9 @@ fn start_control_input(
+     events: Events,
+     finish_js_calls: Arc<AtomicBool>,
+     dispatcher: Arc<Dispatcher>,
++    wan_router: Arc<wan_marks::WanRouter>,
++    params_workers: Arc<AtomicUsize>,
++    scale_notify: Arc<tokio::sync::Notify>,
+     mut stdin: tokio::sync::mpsc::Receiver<StdinLine>,
+ ) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+@@ -883,6 +894,21 @@ fn start_control_input(
+                         }
+                     } else if let Some(payload) = line.strip_prefix("UPDATE_DOMAINS|") {
+                         dispatcher.update_domain_routing(payload);
++                    } else if let Some(spec) = line.strip_prefix("WAN_MARKS|") {
++                        let total = params_workers.load(Ordering::Acquire);
++                        let outcome = wan_router.update(spec, total);
++                        crate::log_error!(
++                            "[MULTI-WAN] Обновлены веса: '{spec}' (dropped={}, rebalance={})",
++                            outcome.dropped_marks.len(),
++                            outcome.rebalance_needed
++                        );
++                    } else if let Some(raw_n) = line.strip_prefix("SCALE_WORKERS|") {
++                        if let Ok(n) = raw_n.trim().parse::<usize>() {
++                            let clamped = n.clamp(1, MAX_WORKERS);
++                            params_workers.store(clamped, Ordering::Release);
++                            scale_notify.notify_waiters();
++                            crate::log_error!("[MULTI-WAN] Масштаб потоков обновлён: {clamped}");
++                        }
+                     }
+                 }
+             }
+diff --git a/rust-client/session.rs b/rust-client/session.rs
+index 3cc2c7d..660b2af 100644
+--- a/rust-client/session.rs
++++ b/rust-client/session.rs
+@@ -50,6 +50,21 @@ const DISCONNECT_CONTROL_ATTEMPTS: usize = 3;
+ const WRITER_COMMAND_CAPACITY: usize = 256;
+ static NEXT_INCARNATION_ID: AtomicU64 = AtomicU64::new(1);
+ 
++tokio::task_local! {
++    static CURRENT_WAN_MARK: Option<u32>;
++}
++
++pub async fn run_session_with_wan_mark(
++    config: SessionConfig,
++    credentials: TurnCredentials,
++    runtime: SessionRuntime,
++    wan_mark: Option<u32>,
++) -> Result<bool> {
++    CURRENT_WAN_MARK
++        .scope(wan_mark, run_session(config, credentials, runtime))
++        .await
++}
++
+ #[derive(Debug)]
+ pub struct TurnAllocateError(anyhow::Error);
+ 
+@@ -980,7 +995,8 @@ pub async fn run_session(
+     if let Some(started) = runtime.allocation_started.take() {
+         let _ = started.send(());
+     }
+-    let mut connect = Box::pin(TurnAllocation::connect_diagnosed(
++    let wan_mark = CURRENT_WAN_MARK.try_with(|m| *m).ok().flatten();
++    let mut connect = Box::pin(TurnAllocation::connect_diagnosed_marked(
+         TurnConnectTarget {
+             address: turn_address,
+             override_host: turn_host.as_deref(),
+@@ -992,6 +1008,7 @@ pub async fn run_session(
+         credentials.password,
+         config.peer,
+         runtime.pool.clone(),
++        wan_mark,
+         Some(&mut diagnostic),
+     ));
+     let allocation_result = tokio::select! {
+diff --git a/rust-client/stats.rs b/rust-client/stats.rs
+index 01d1743..276e097 100644
+--- a/rust-client/stats.rs
++++ b/rust-client/stats.rs
+@@ -26,7 +26,12 @@ pub struct Stats {
+ }
+ 
+ impl Stats {
+-    pub async fn run(self: Arc<Self>, events: Events, cancel: CancellationToken) {
++    pub async fn run(
++        self: Arc<Self>,
++        events: Events,
++        wan_router: Arc<crate::wan_marks::WanRouter>,
++        cancel: CancellationToken,
++    ) {
+         crate::traffic_diagnostics::init_from_env();
+         let mut traffic = crate::traffic_diagnostics::Reporter::default();
+         let mut traffic_at = std::time::Instant::now();
+@@ -51,7 +56,8 @@ impl Stats {
+                         traffic_at = std::time::Instant::now();
+                     }
+                     if should_emit(last_emitted, now, ticks_since_emit) {
+-                        events.stats(active, up, down);
++                        let wan_streams = wan_router.snapshot_wan_streams();
++                        events.stats_with_wan(active, up, down, &wan_streams);
+                         last_emitted = Some(now);
+                         ticks_since_emit = 0;
+                         // the log line (stderr) rides on a STATS tick: on an idle tunnel both go out together every
+diff --git a/rust-client/turn.rs b/rust-client/turn.rs
+index 2ad1f35..532e831 100644
+--- a/rust-client/turn.rs
++++ b/rust-client/turn.rs
+@@ -357,6 +357,19 @@ impl TurnAllocation {
+         password: Arc<str>,
+         peer: SocketAddr,
+         pool: Arc<PacketPool>,
++        diagnostic: Option<&mut crate::stream_diagnostics::StreamDiagnostics>,
++    ) -> Result<Arc<Self>> {
++        Self::connect_diagnosed_marked(target, username, password, peer, pool, None, diagnostic)
++            .await
++    }
++
++    pub async fn connect_diagnosed_marked(
++        target: TurnConnectTarget<'_>,
++        username: Arc<str>,
++        password: Arc<str>,
++        peer: SocketAddr,
++        pool: Arc<PacketPool>,
++        wan_mark: Option<u32>,
+         mut diagnostic: Option<&mut crate::stream_diagnostics::StreamDiagnostics>,
+     ) -> Result<Arc<Self>> {
+         if username.len() > 512 {
+@@ -372,7 +385,8 @@ impl TurnAllocation {
+             target.transport_mode,
+         )?;
+         let (outbound, inbound, server, transport) =
+-            connect_transport(&endpoints, target.gooby_proxy, diagnostic.as_deref_mut()).await?;
++            connect_transport(&endpoints, target.gooby_proxy, wan_mark, diagnostic.as_deref_mut())
++                .await?;
+         if let Some(d) = diagnostic.as_deref_mut() { d.begin("allocate"); }
+         crate::log_error!("[TURN] Транспорт: {}", transport.as_str());
+         if let Some(proxy) = target.gooby_proxy {
+@@ -803,6 +817,7 @@ impl Drop for TurnAllocation {
+ async fn connect_transport(
+     endpoints: &[TurnEndpoint],
+     gooby_proxy: Option<crate::gooby::GoobyProxy>,
++    wan_mark: Option<u32>,
+     mut diagnostic: Option<&mut crate::stream_diagnostics::StreamDiagnostics>,
+ ) -> Result<(TurnOutbound, TurnInbound, SocketAddr, TurnWireTransport)> {
+     if gooby_proxy.is_some()
+@@ -840,6 +855,14 @@ async fn connect_transport(
+                         SocketAddr::from(([0u16; 8], 0))
+                     };
+                     let socket = Arc::new(UdpSocket::bind(bind).await.context("TURN UDP bind")?);
++                    #[cfg(target_os = "linux")]
++                    if let Some(mark) = wan_mark {
++                        SockRef::from(&*socket)
++                            .set_mark(mark)
++                            .with_context(|| format!("TURN UDP SO_MARK 0x{mark:x}"))?;
++                    }
++                    #[cfg(not(target_os = "linux"))]
++                    let _ = wan_mark;
+                     configure_udp_socket_buffers(&socket);
+                     socket
+                         .connect(server)
+@@ -854,7 +877,7 @@ async fn connect_transport(
+                 }
+                 TurnWireTransport::Tcp | TurnWireTransport::Tls => {
+                     let (writer, reader, write_failure) =
+-                        turn_stream::connect(endpoint, server, gooby_proxy).await?;
++                        turn_stream::connect_marked(endpoint, server, gooby_proxy, wan_mark).await?;
+                     Ok((
+                         TurnOutbound::Stream(writer),
+                         TurnInbound::Stream(reader, write_failure),
+diff --git a/rust-client/turn_stream.rs b/rust-client/turn_stream.rs
+index 994c855..d85e191 100644
+--- a/rust-client/turn_stream.rs
++++ b/rust-client/turn_stream.rs
+@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
+ use bytes::{Bytes, BytesMut};
+ use socket2::{SockRef, TcpKeepalive};
+ use std::{
+-    net::SocketAddr,
++    net::{IpAddr, SocketAddr},
+     sync::{Arc, OnceLock},
+ };
+ use tokio::{
+@@ -58,9 +58,23 @@ pub async fn connect(
+     TurnStreamReader,
+     TurnStreamWriteFailure,
+ )> {
+-    connect_inner(endpoint, server, gooby_proxy, None).await
++    connect_inner_marked(endpoint, server, gooby_proxy, None, None).await
+ }
+ 
++pub async fn connect_marked(
++    endpoint: &TurnEndpoint,
++    server: SocketAddr,
++    gooby_proxy: Option<crate::gooby::GoobyProxy>,
++    wan_mark: Option<u32>,
++) -> Result<(
++    Arc<TurnStreamWriter>,
++    TurnStreamReader,
++    TurnStreamWriteFailure,
++)> {
++    connect_inner_marked(endpoint, server, gooby_proxy, None, wan_mark).await
++}
++
++#[cfg(test)]
+ async fn connect_inner(
+     endpoint: &TurnEndpoint,
+     server: SocketAddr,
+@@ -70,6 +84,71 @@ async fn connect_inner(
+     Arc<TurnStreamWriter>,
+     TurnStreamReader,
+     TurnStreamWriteFailure,
++)> {
++    connect_inner_marked(endpoint, server, gooby_proxy, tls, None).await
++}
++
++pub(crate) async fn connect_tcp_marked(
++    server: SocketAddr,
++    wan_mark: Option<u32>,
++    local_ip: Option<IpAddr>,
++) -> Result<TcpStream> {
++    let bind_ip = local_ip.filter(|ip| !server.ip().is_loopback() && ip.is_ipv4() == server.is_ipv4());
++    #[cfg(target_os = "linux")]
++    if wan_mark.is_some() || bind_ip.is_some() {
++        let socket = if server.is_ipv4() {
++            tokio::net::TcpSocket::new_v4().context("TURN TCP socket v4")?
++        } else {
++            tokio::net::TcpSocket::new_v6().context("TURN TCP socket v6")?
++        };
++        if let Some(mark) = wan_mark {
++            SockRef::from(&socket)
++                .set_mark(mark)
++                .with_context(|| format!("TURN TCP SO_MARK 0x{mark:x}"))?;
++        }
++        if let Some(ip) = bind_ip {
++            socket
++                .bind(SocketAddr::new(ip, 0))
++                .with_context(|| format!("TURN TCP bind {ip}"))?;
++        }
++        return socket
++            .connect(server)
++            .await
++            .context("TURN TCP marked socket connect");
++    }
++    #[cfg(not(target_os = "linux"))]
++    {
++        let _ = wan_mark;
++        if let Some(ip) = bind_ip {
++            let socket = if server.is_ipv4() {
++                tokio::net::TcpSocket::new_v4().context("TURN TCP socket v4")?
++            } else {
++                tokio::net::TcpSocket::new_v6().context("TURN TCP socket v6")?
++            };
++            socket
++                .bind(SocketAddr::new(ip, 0))
++                .with_context(|| format!("TURN TCP bind {ip}"))?;
++            return socket
++                .connect(server)
++                .await
++                .context("TURN TCP bound socket connect");
++        }
++    }
++    TcpStream::connect(server)
++        .await
++        .context("TURN TCP socket connect")
++}
++
++async fn connect_inner_marked(
++    endpoint: &TurnEndpoint,
++    server: SocketAddr,
++    gooby_proxy: Option<crate::gooby::GoobyProxy>,
++    tls: Option<Arc<ClientConfig>>,
++    wan_mark: Option<u32>,
++) -> Result<(
++    Arc<TurnStreamWriter>,
++    TurnStreamReader,
++    TurnStreamWriteFailure,
+ )> {
+     if endpoint.transport == TurnWireTransport::Udp {
+         bail!("UDP endpoint cannot create a TURN stream");
+@@ -77,9 +156,7 @@ async fn connect_inner(
+     let socket = timeout(STREAM_CONNECT_TIMEOUT, async {
+         match gooby_proxy {
+             Some(proxy) => crate::gooby::connect(proxy, &endpoint.host, endpoint.port).await,
+-            None => TcpStream::connect(server)
+-                .await
+-                .context("TURN TCP socket connect"),
++            None => connect_tcp_marked(server, wan_mark, None).await,
+         }
+     })
+     .await
+diff --git a/rust-client/wan_marks.rs b/rust-client/wan_marks.rs
+new file mode 100644
+index 0000000..d37567b
+--- /dev/null
++++ b/rust-client/wan_marks.rs
+@@ -0,0 +1,763 @@
++use std::{
++    collections::{BTreeMap, HashMap, HashSet},
++    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
++    sync::{Arc, RwLock},
++    time::Duration,
++};
++use tokio::{
++    io::{AsyncReadExt, AsyncWriteExt},
++    net::{TcpListener, TcpStream},
++    sync::{Mutex, watch},
++};
++
++use crate::worker::WORKERS_PER_CREDENTIAL;
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct WanTarget {
++    pub mark: u32,
++    pub weight: u32,
++    pub bind_ip: Option<IpAddr>,
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct WanUpdateOutcome {
++    pub dropped_marks: HashSet<u32>,
++    pub rebalance_needed: bool,
++}
++
++#[derive(Default)]
++struct WanState {
++    targets: Vec<WanTarget>,
++    version: u64,
++    worker_marks: HashMap<usize, u32>,
++    ready_marks: HashMap<usize, u32>,
++    force_cancel_workers: HashSet<usize>,
++    migration_gen: u64,
++}
++
++pub struct WanRouter {
++    state: RwLock<WanState>,
++    tx: watch::Sender<u64>,
++    local_proxy_port: Mutex<Option<u16>>,
++}
++
++/// Разбирает строку `<mark>:<weight>[@<ip>],...` (поддерживает hex `0x...` и dec).
++pub fn parse_wan_marks(spec: &str) -> Vec<WanTarget> {
++    let mut out = Vec::new();
++    let mut seen_marks = HashSet::new();
++    for raw in spec.split(',') {
++        let entry = raw.trim();
++        if entry.is_empty() {
++            continue;
++        }
++        let Some((mark_raw, rest)) = entry.split_once(':') else {
++            continue;
++        };
++        let mark_str = mark_raw.trim();
++        let mark = if let Some(hex) = mark_str
++            .strip_prefix("0x")
++            .or_else(|| mark_str.strip_prefix("0X"))
++        {
++            u32::from_str_radix(hex, 16).ok()
++        } else {
++            mark_str.parse::<u32>().ok()
++        };
++        let Some(mark) = mark.filter(|m| *m != 0) else {
++            continue;
++        };
++
++        let (weight_str, bind_ip) = match rest.split_once('@') {
++            Some((w, ip_str)) => (w.trim(), ip_str.trim().parse::<IpAddr>().ok()),
++            None => (rest.trim(), None),
++        };
++        let Ok(weight) = weight_str.parse::<u32>() else {
++            continue;
++        };
++        if weight == 0 || !seen_marks.insert(mark) {
++            continue;
++        }
++        out.push(WanTarget {
++            mark,
++            weight,
++            bind_ip,
++        });
++    }
++    out
++}
++
++/// Детерминированное распределение `count` слотов по весам методом наибольших остатков.
++fn allocate_counts(targets: &[WanTarget], count: usize) -> Vec<usize> {
++    if targets.is_empty() || count == 0 {
++        return vec![0; targets.len()];
++    }
++    let total_weight: u64 = targets.iter().map(|t| u64::from(t.weight)).sum();
++    if total_weight == 0 {
++        return vec![0; targets.len()];
++    }
++    let mut counts = vec![0usize; targets.len()];
++    let mut remainders: Vec<(usize, u64)> = Vec::with_capacity(targets.len());
++    let mut assigned = 0usize;
++
++    for (idx, target) in targets.iter().enumerate() {
++        let num = u64::from(target.weight) * (count as u64);
++        let base = (num / total_weight) as usize;
++        let rem = num % total_weight;
++        counts[idx] = base;
++        assigned += base;
++        remainders.push((idx, rem));
++    }
++    remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
++    for (idx, _) in remainders.into_iter().take(count.saturating_sub(assigned)) {
++        counts[idx] += 1;
++    }
++    counts
++}
++
++fn target_index_for_slot(targets: &[WanTarget], slot: usize, total_slots: usize) -> Option<usize> {
++    if targets.is_empty() || total_slots == 0 {
++        return None;
++    }
++    let counts = allocate_counts(targets, total_slots);
++    let mut cursor = 0usize;
++    let clamped = slot.min(total_slots.saturating_sub(1));
++    for (idx, &c) in counts.iter().enumerate() {
++        if clamped < cursor + c {
++            return Some(idx);
++        }
++        cursor += c;
++    }
++    Some(0)
++}
++
++impl WanRouter {
++    pub fn new(initial_spec: &str) -> Arc<Self> {
++        let targets = parse_wan_marks(initial_spec);
++        let (tx, _) = watch::channel(0u64);
++        Arc::new(Self {
++            state: RwLock::new(WanState {
++                targets,
++                version: 0,
++                ..Default::default()
++            }),
++            tx,
++            local_proxy_port: Mutex::new(None),
++        })
++    }
++
++    pub fn has_targets(&self) -> bool {
++        !self
++            .state
++            .read()
++            .unwrap_or_else(|e| e.into_inner())
++            .targets
++            .is_empty()
++    }
++
++    /// Возвращает целевой WAN для воркера (1-based `worker_id`) и фиксирует его привязку.
++    /// При `total_workers >= 2 * WORKERS_PER_CREDENTIAL` привязка идёт по когортам (по 10 потоков),
++    /// иначе — пропорционально по воркерам.
++    pub fn assign_worker(&self, worker_id: usize, total_workers: usize) -> Option<WanTarget> {
++        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
++        if st.targets.is_empty() {
++            st.worker_marks.remove(&worker_id);
++            return None;
++        }
++        let target = Self::compute_target_locked(&st.targets, worker_id, total_workers)?;
++        st.worker_marks.insert(worker_id, target.mark);
++        st.force_cancel_workers.remove(&worker_id);
++        Some(target)
++    }
++
++    fn compute_target_locked(
++        targets: &[WanTarget],
++        worker_id: usize,
++        total_workers: usize,
++    ) -> Option<WanTarget> {
++        if targets.is_empty() {
++            return None;
++        }
++        let zero_based = worker_id.saturating_sub(1);
++        let use_cohorts = total_workers >= 2 * WORKERS_PER_CREDENTIAL && targets.len() > 1;
++        let (slot, total_slots) = if use_cohorts {
++            let total_cohorts = total_workers.div_ceil(WORKERS_PER_CREDENTIAL);
++            (zero_based / WORKERS_PER_CREDENTIAL, total_cohorts)
++        } else {
++            (zero_based, total_workers.max(1))
++        };
++        let idx = target_index_for_slot(targets, slot, total_slots)?;
++        targets.get(idx).cloned()
++    }
++
++    /// Возвращает `bind_ip` для заданной метки `SO_MARK`.
++    pub fn bind_ip_for_mark(&self, mark: u32) -> Option<IpAddr> {
++        let st = self.state.read().unwrap_or_else(|e| e.into_inner());
++        st.targets
++            .iter()
++            .find(|t| t.mark == mark)
++            .and_then(|t| t.bind_ip)
++    }
++
++    /// Запускает локальный loopback SOCKS5-форвардер (127.0.0.1:0), который применяет SO_MARK и local_ip.
++    pub async fn ensure_local_socks5_proxy(self: &Arc<Self>) -> anyhow::Result<u16> {
++        let mut guard = self.local_proxy_port.lock().await;
++        if let Some(port) = *guard {
++            return Ok(port);
++        }
++        let listener = TcpListener::bind("127.0.0.1:0").await?;
++        let port = listener.local_addr()?.port();
++        *guard = Some(port);
++        drop(guard);
++
++        let router = Arc::clone(self);
++        tokio::spawn(async move {
++            loop {
++                match listener.accept().await {
++                    Ok((stream, _)) => {
++                        let r = Arc::clone(&router);
++                        tokio::spawn(async move {
++                            let _ = handle_socks5_client(stream, r).await;
++                        });
++                    }
++                    Err(e) => {
++                        crate::log_error!("[WAN-SOCKS5] accept error: {e}");
++                        tokio::time::sleep(Duration::from_millis(50)).await;
++                    }
++                }
++            }
++        });
++        Ok(port)
++    }
++
++    /// Возвращает `(socks5://u:<mark_hex>@127.0.0.1:<port>, bind_ip)` для когорты VK API (1-based `credential_id`).
++    pub async fn socks5_proxy_for_credential(
++        self: &Arc<Self>,
++        credential_id: usize,
++        total_workers: usize,
++    ) -> Option<(String, Option<IpAddr>)> {
++        let target = {
++            let st = self.state.read().unwrap_or_else(|e| e.into_inner());
++            if st.targets.is_empty() {
++                return None;
++            }
++            let first_worker_id = credential_id
++                .saturating_sub(1)
++                .saturating_mul(WORKERS_PER_CREDENTIAL)
++                + 1;
++            Self::compute_target_locked(&st.targets, first_worker_id, total_workers)?
++        };
++        let port = self.ensure_local_socks5_proxy().await.ok()?;
++        let url = format!("socks5://u:{:08x}@127.0.0.1:{port}", target.mark);
++        Some((url, target.bind_ip))
++    }
++
++    /// Возвращает `bind_ip` для HTTP-клиента когорты VK API (1-based `credential_id`).
++    pub fn bind_ip_for_credential(
++        &self,
++        credential_id: usize,
++        total_workers: usize,
++    ) -> Option<IpAddr> {
++        let st = self.state.read().unwrap_or_else(|e| e.into_inner());
++        if st.targets.is_empty() {
++            return None;
++        }
++        let first_worker_id = credential_id
++            .saturating_sub(1)
++            .saturating_mul(WORKERS_PER_CREDENTIAL)
++            + 1;
++        Self::compute_target_locked(&st.targets, first_worker_id, total_workers)
++            .and_then(|t| t.bind_ip)
++    }
++
++    pub fn on_worker_ready(&self, worker_id: usize, mark: Option<u32>) {
++        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
++        match mark {
++            Some(m) => {
++                st.ready_marks.insert(worker_id, m);
++            }
++            None => {
++                st.ready_marks.remove(&worker_id);
++            }
++        }
++    }
++
++    pub fn on_worker_down(&self, worker_id: usize) {
++        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
++        st.ready_marks.remove(&worker_id);
++    }
++
++    pub fn snapshot_wan_streams(&self) -> BTreeMap<String, i32> {
++        let st = self.state.read().unwrap_or_else(|e| e.into_inner());
++        let mut counts: BTreeMap<String, i32> = BTreeMap::new();
++        for t in &st.targets {
++            counts.entry(format!("0x{:08x}", t.mark)).or_insert(0);
++        }
++        for &m in st.ready_marks.values() {
++            *counts.entry(format!("0x{:08x}", m)).or_insert(0) += 1;
++        }
++        counts
++    }
++
++    /// Применяет новую конфигурацию весов/каналов:
++    /// - 0-мс отмена ТОЛЬКО воркеров, сидевших на пропавших марках;
++    /// - плавная (2-3 воркера/с) миграция лишних воркеров при добавлении/изменении весов.
++    pub fn update(self: &Arc<Self>, spec: &str, total_workers: usize) -> WanUpdateOutcome {
++        let next_targets = parse_wan_marks(spec);
++        let next_set: HashSet<u32> = next_targets.iter().map(|t| t.mark).collect();
++
++        let (dropped_marks, rebalance_needed, excess_workers, mig_gen, next_ver) = {
++            let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
++            if st.targets == next_targets {
++                return WanUpdateOutcome::default();
++            }
++            let prev_set: HashSet<u32> = st.targets.iter().map(|t| t.mark).collect();
++            let dropped: HashSet<u32> = prev_set.difference(&next_set).copied().collect();
++
++            // Мгновенно помечаем для 0-мс отмены только воркеры на упавших марках
++            let mut dropped_workers = Vec::new();
++            for (&wid, &m) in &st.worker_marks {
++                if dropped.contains(&m) {
++                    dropped_workers.push(wid);
++                }
++            }
++            for wid in dropped_workers {
++                st.force_cancel_workers.insert(wid);
++            }
++
++            // Определяем воркеры, чья желаемая марка изменилась (но не из-за drop)
++            let mut excess = Vec::new();
++            for (&wid, &cur_m) in &st.worker_marks {
++                if dropped.contains(&cur_m) {
++                    continue;
++                }
++                let desired =
++                    Self::compute_target_locked(&next_targets, wid, total_workers).map(|t| t.mark);
++                if desired != Some(cur_m) {
++                    excess.push(wid);
++                }
++            }
++            excess.sort_unstable();
++
++            st.targets = next_targets;
++            st.version = st.version.wrapping_add(1);
++            st.migration_gen = st.migration_gen.wrapping_add(1);
++            let rebalance = !excess.is_empty();
++            (dropped, rebalance, excess, st.migration_gen, st.version)
++        };
++
++        let _ = self.tx.send(next_ver);
++
++        // Плавная миграция при hot-plug нового канала или изменении весов (2.5 воркера/с)
++        if !excess_workers.is_empty() {
++            let router = Arc::clone(self);
++            if let Ok(handle) = tokio::runtime::Handle::try_current() {
++                handle.spawn(async move {
++                    for wid in excess_workers {
++                        tokio::time::sleep(Duration::from_millis(400)).await;
++                        let next_v = {
++                            let mut st = router.state.write().unwrap_or_else(|e| e.into_inner());
++                            if st.migration_gen != mig_gen {
++                                return;
++                            }
++                            st.force_cancel_workers.insert(wid);
++                            st.version = st.version.wrapping_add(1);
++                            st.version
++                        };
++                        let _ = router.tx.send(next_v);
++                    }
++                });
++            }
++        }
++
++        WanUpdateOutcome {
++            dropped_marks,
++            rebalance_needed,
++        }
++    }
++
++    /// Ждёт, пока данный воркер не будет помечен к немедленной отмене (0-ms hot-swap или плавная миграция).
++    pub async fn wait_worker_cancel(&self, worker_id: usize) {
++        let mut rx = self.tx.subscribe();
++        loop {
++            {
++                let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
++                if st.force_cancel_workers.remove(&worker_id) {
++                    return;
++                }
++            }
++            if rx.changed().await.is_err() {
++                std::future::pending::<()>().await;
++            }
++        }
++    }
++}
++
++async fn handle_socks5_client(mut client: TcpStream, router: Arc<WanRouter>) -> anyhow::Result<()> {
++    let _ = client.set_nodelay(true);
++    let mut head = [0u8; 2];
++    client.read_exact(&mut head).await?;
++    if head[0] != 0x05 {
++        anyhow::bail!("unexpected SOCKS version {}", head[0]);
++    }
++    let nmethods = head[1] as usize;
++    let mut methods = vec![0u8; nmethods];
++    client.read_exact(&mut methods).await?;
++
++    let (mark, local_ip) = if methods.contains(&0x02) {
++        client.write_all(&[0x05, 0x02]).await?;
++        let mut auth_head = [0u8; 2];
++        client.read_exact(&mut auth_head).await?;
++        if auth_head[0] != 0x01 {
++            let _ = client.write_all(&[0x01, 0x01]).await;
++            anyhow::bail!("unsupported SOCKS5 auth version {}", auth_head[0]);
++        }
++        let ulen = auth_head[1] as usize;
++        let mut ubuf = vec![0u8; ulen];
++        client.read_exact(&mut ubuf).await?;
++        let mut plen_buf = [0u8; 1];
++        client.read_exact(&mut plen_buf).await?;
++        let mut pbuf = vec![0u8; plen_buf[0] as usize];
++        client.read_exact(&mut pbuf).await?;
++        client.write_all(&[0x01, 0x00]).await?;
++
++        let uname = String::from_utf8_lossy(&ubuf);
++        let passwd = String::from_utf8_lossy(&pbuf);
++        let mark_str = passwd
++            .trim()
++            .trim_start_matches("0x")
++            .trim_start_matches("0X");
++        let parsed_mark = u32::from_str_radix(mark_str, 16)
++            .ok()
++            .filter(|&m| m != 0);
++        let parsed_ip = uname
++            .trim()
++            .parse::<IpAddr>()
++            .ok()
++            .or_else(|| parsed_mark.and_then(|m| router.bind_ip_for_mark(m)));
++        (parsed_mark, parsed_ip)
++    } else if methods.contains(&0x00) {
++        client.write_all(&[0x05, 0x00]).await?;
++        (None, None)
++    } else {
++        let _ = client.write_all(&[0x05, 0xff]).await;
++        anyhow::bail!("no supported SOCKS5 auth methods");
++    };
++
++    let mut req = [0u8; 4];
++    client.read_exact(&mut req).await?;
++    if req[0] != 0x05 || req[1] != 0x01 {
++        let _ = client
++            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++            .await;
++        anyhow::bail!("unsupported SOCKS5 command {}", req[1]);
++    }
++
++    let mut addrs: Vec<SocketAddr> = match req[3] {
++        0x01 => {
++            let mut buf = [0u8; 6];
++            client.read_exact(&mut buf).await?;
++            let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
++            let port = u16::from_be_bytes([buf[4], buf[5]]);
++            vec![SocketAddr::new(IpAddr::V4(ip), port)]
++        }
++        0x03 => {
++            let mut len_buf = [0u8; 1];
++            client.read_exact(&mut len_buf).await?;
++            let mut host_buf = vec![0u8; len_buf[0] as usize];
++            client.read_exact(&mut host_buf).await?;
++            let mut port_buf = [0u8; 2];
++            client.read_exact(&mut port_buf).await?;
++            let host = String::from_utf8(host_buf)?;
++            let port = u16::from_be_bytes(port_buf);
++            let mut resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
++                .await?
++                .collect();
++            if local_ip.is_some_and(|ip| ip.is_ipv4()) {
++                resolved.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
++            }
++            resolved
++        }
++        0x04 => {
++            let mut buf = [0u8; 18];
++            client.read_exact(&mut buf).await?;
++            let mut octets = [0u8; 16];
++            octets.copy_from_slice(&buf[..16]);
++            let ip = Ipv6Addr::from(octets);
++            let port = u16::from_be_bytes([buf[16], buf[17]]);
++            vec![SocketAddr::new(IpAddr::V6(ip), port)]
++        }
++        atyp => {
++            let _ = client
++                .write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++                .await;
++            anyhow::bail!("unsupported SOCKS5 ATYP {atyp}");
++        }
++    };
++
++    if addrs.is_empty() {
++        let _ = client
++            .write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++            .await;
++        anyhow::bail!("no resolved addresses for SOCKS5 target");
++    }
++
++    let mut connected: Option<TcpStream> = None;
++    let mut last_err: Option<anyhow::Error> = None;
++    for addr in addrs.drain(..).take(4) {
++        match tokio::time::timeout(
++            Duration::from_secs(15),
++            crate::turn_stream::connect_tcp_marked(addr, mark, local_ip),
++        )
++        .await
++        {
++            Ok(Ok(stream)) => {
++                connected = Some(stream);
++                break;
++            }
++            Ok(Err(e)) => last_err = Some(e),
++            Err(_) => last_err = Some(anyhow::anyhow!("connect timeout to {addr}")),
++        }
++    }
++
++    let mut upstream = match connected {
++        Some(s) => s,
++        None => {
++            let _ = client
++                .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++                .await;
++            return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("upstream connect failed")));
++        }
++    };
++
++    let _ = upstream.set_nodelay(true);
++    client
++        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
++        .await?;
++    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parse_wan_marks_supports_hex_dec_and_ip() {
++        let parsed = parse_wan_marks("0x10000000:60@192.168.10.22, 0x20000000:40@192.168.2.52, 0x30000000:0");
++        assert_eq!(parsed.len(), 2);
++        assert_eq!(parsed[0].mark, 0x1000_0000);
++        assert_eq!(parsed[0].weight, 60);
++        assert_eq!(
++            parsed[0].bind_ip,
++            Some("192.168.10.22".parse::<IpAddr>().unwrap())
++        );
++        assert_eq!(parsed[1].mark, 0x2000_0000);
++        assert_eq!(parsed[1].weight, 40);
++    }
++
++    #[test]
++    fn worker_and_cohort_distribution_follows_weights() {
++        let router = WanRouter::new("0x10000000:60@192.168.10.22,0x20000000:40@192.168.2.52");
++        let mut c1 = 0;
++        let mut c2 = 0;
++        for wid in 1..=20 {
++            let t = router.assign_worker(wid, 20).unwrap();
++            if t.mark == 0x1000_0000 {
++                c1 += 1;
++            } else {
++                c2 += 1;
++            }
++        }
++        // 20 воркеров = 2 когорты по 10 воркеров -> когорта 1 на 0x10000000, когорта 2 на 0x20000000
++        assert_eq!(c1, 10);
++        assert_eq!(c2, 10);
++        assert_eq!(
++            router.bind_ip_for_credential(1, 20),
++            Some("192.168.10.22".parse().unwrap())
++        );
++        assert_eq!(
++            router.bind_ip_for_credential(2, 20),
++            Some("192.168.2.52".parse().unwrap())
++        );
++    }
++
++    #[test]
++    fn zero_ms_hotswap_cancels_only_dropped_mark_workers() {
++        let router = WanRouter::new("0x10000000:50,0x20000000:50");
++        for wid in 1..=20 {
++            let t = router.assign_worker(wid, 20).unwrap();
++            router.on_worker_ready(wid, Some(t.mark));
++        }
++        assert_eq!(router.snapshot_wan_streams().get("0x10000000"), Some(&10));
++        assert_eq!(router.snapshot_wan_streams().get("0x20000000"), Some(&10));
++
++        let outcome = router.update("0x10000000:100", 20);
++        assert!(outcome.dropped_marks.contains(&0x2000_0000));
++        let st = router.state.read().unwrap();
++        // Только воркеры 11..=20 (сидевшие на 0x20000000) помечены к 0-мс отмене
++        for wid in 1..=10 {
++            assert!(!st.force_cancel_workers.contains(&wid));
++        }
++        for wid in 11..=20 {
++            assert!(st.force_cancel_workers.contains(&wid));
++        }
++    }
++
++    #[tokio::test]
++    async fn socks5_proxy_for_credential_maps_cohorts_to_distinct_marks_and_ips() {
++        let empty = WanRouter::new("");
++        assert!(empty.socks5_proxy_for_credential(1, 20).await.is_none());
++
++        let router = WanRouter::new("0x10000000:50@192.168.10.22,0x20000000:50@192.168.2.52");
++        let (url1, ip1) = router.socks5_proxy_for_credential(1, 20).await.unwrap();
++        let (url2, ip2) = router.socks5_proxy_for_credential(2, 20).await.unwrap();
++        assert!(url1.starts_with("socks5://u:10000000@127.0.0.1:"), "{url1}");
++        assert!(url2.starts_with("socks5://u:20000000@127.0.0.1:"), "{url2}");
++        assert_eq!(ip1, Some("192.168.10.22".parse().unwrap()));
++        assert_eq!(ip2, Some("192.168.2.52".parse().unwrap()));
++    }
++
++    #[tokio::test]
++    async fn socks5_forwarder_handles_ipv4_domain_and_ipv6_with_auth() {
++        // Echo TCP server on 127.0.0.1
++        let echo_v4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let echo_v4_addr = echo_v4.local_addr().unwrap();
++        tokio::spawn(async move {
++            loop {
++                let Ok((mut s, _)) = echo_v4.accept().await else {
++                    break;
++                };
++                tokio::spawn(async move {
++                    let mut buf = [0u8; 64];
++                    if let Ok(n) = s.read(&mut buf).await {
++                        let _ = s.write_all(&buf[..n]).await;
++                    }
++                });
++            }
++        });
++
++        let router = WanRouter::new("0x10000000:100@127.0.0.1");
++        let port = router.ensure_local_socks5_proxy().await.unwrap();
++
++        // 1. ATYP 0x01 (IPv4) with username/password auth (0x02)
++        {
++            let mut cli = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++            cli.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
++            let mut m = [0u8; 2];
++            cli.read_exact(&mut m).await.unwrap();
++            assert_eq!(m, [0x05, 0x02]);
++
++            let uname = b"u";
++            let passwd = b"10000000";
++            let mut auth = vec![0x01, uname.len() as u8];
++            auth.extend_from_slice(uname);
++            auth.push(passwd.len() as u8);
++            auth.extend_from_slice(passwd);
++            cli.write_all(&auth).await.unwrap();
++            let mut ares = [0u8; 2];
++            cli.read_exact(&mut ares).await.unwrap();
++            assert_eq!(ares, [0x01, 0x00]);
++
++            let ip = match echo_v4_addr.ip() {
++                IpAddr::V4(v4) => v4.octets(),
++                _ => unreachable!(),
++            };
++            let mut req = vec![0x05, 0x01, 0x00, 0x01];
++            req.extend_from_slice(&ip);
++            req.extend_from_slice(&echo_v4_addr.port().to_be_bytes());
++            cli.write_all(&req).await.unwrap();
++            let mut rep = [0u8; 10];
++            cli.read_exact(&mut rep).await.unwrap();
++            assert_eq!(rep[1], 0x00);
++
++            cli.write_all(b"ping-v4").await.unwrap();
++            let mut echo = [0u8; 7];
++            cli.read_exact(&mut echo).await.unwrap();
++            assert_eq!(&echo, b"ping-v4");
++        }
++
++        // 2. ATYP 0x03 (Domain "localhost") with no-auth (0x00)
++        {
++            let mut cli = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++            cli.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
++            let mut m = [0u8; 2];
++            cli.read_exact(&mut m).await.unwrap();
++            assert_eq!(m, [0x05, 0x00]);
++
++            let dom = b"127.0.0.1";
++            let mut req = vec![0x05, 0x01, 0x00, 0x03, dom.len() as u8];
++            req.extend_from_slice(dom);
++            req.extend_from_slice(&echo_v4_addr.port().to_be_bytes());
++            cli.write_all(&req).await.unwrap();
++            let mut rep = [0u8; 10];
++            cli.read_exact(&mut rep).await.unwrap();
++            assert_eq!(rep[1], 0x00);
++
++            cli.write_all(b"ping-dom").await.unwrap();
++            let mut echo = [0u8; 8];
++            cli.read_exact(&mut echo).await.unwrap();
++            assert_eq!(&echo, b"ping-dom");
++        }
++
++        // 3. ATYP 0x04 (IPv6 [::1]) if IPv6 loopback is available
++        if let Ok(echo_v6) = TcpListener::bind("[::1]:0").await {
++            let echo_v6_addr = echo_v6.local_addr().unwrap();
++            tokio::spawn(async move {
++                if let Ok((mut s, _)) = echo_v6.accept().await {
++                    let mut buf = [0u8; 64];
++                    if let Ok(n) = s.read(&mut buf).await {
++                        let _ = s.write_all(&buf[..n]).await;
++                    }
++                }
++            });
++            let mut cli = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
++            cli.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
++            let mut m = [0u8; 2];
++            cli.read_exact(&mut m).await.unwrap();
++            assert_eq!(m, [0x05, 0x00]);
++
++            let ip6 = match echo_v6_addr.ip() {
++                IpAddr::V6(v6) => v6.octets(),
++                _ => unreachable!(),
++            };
++            let mut req = vec![0x05, 0x01, 0x00, 0x04];
++            req.extend_from_slice(&ip6);
++            req.extend_from_slice(&echo_v6_addr.port().to_be_bytes());
++            cli.write_all(&req).await.unwrap();
++            let mut rep = [0u8; 10];
++            cli.read_exact(&mut rep).await.unwrap();
++            assert_eq!(rep[1], 0x00);
++
++            cli.write_all(b"ping-v6").await.unwrap();
++            let mut echo = [0u8; 7];
++            cli.read_exact(&mut echo).await.unwrap();
++            assert_eq!(&echo, b"ping-v6");
++        }
++
++        // 4. End-to-end primp Client through socks5://u:<mark>@127.0.0.1:<port>
++        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let http_addr = http_listener.local_addr().unwrap();
++        tokio::spawn(async move {
++            if let Ok((mut s, _)) = http_listener.accept().await {
++                let mut buf = [0u8; 1024];
++                let _ = s.read(&mut buf).await;
++                let _ = s
++                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
++                    .await;
++            }
++        });
++        let (proxy_url, _) = router.socks5_proxy_for_credential(1, 10).await.unwrap();
++        let client = primp::Client::builder()
++            .proxy(primp::Proxy::all(&proxy_url).unwrap())
++            .build()
++            .unwrap();
++        let body = client
++            .get(format!("http://{http_addr}/test"))
++            .send()
++            .await
++            .unwrap()
++            .text()
++            .await
++            .unwrap();
++        assert_eq!(body, "ok");
++    }
++}
+diff --git a/rust-client/worker.rs b/rust-client/worker.rs
+index 3054228..4be8d96 100644
+--- a/rust-client/worker.rs
++++ b/rust-client/worker.rs
+@@ -7,7 +7,6 @@ use crate::{
+     repair::RepairState,
+     session::{
+         ConfigDeliveryState, SessionConfig, SessionRuntime, ShutdownCoordinator, TurnAllocateError,
+-        run_session,
+     },
+     srtp_mode::SrtpMode,
+     stats::Stats,
+@@ -137,6 +136,7 @@ pub struct GroupContext {
+     pub shutdown: Arc<ShutdownCoordinator>,
+     pub cancel: CancellationToken,
+     pub scale_notify: Arc<tokio::sync::Notify>,
++    pub wan_router: Arc<crate::wan_marks::WanRouter>,
+ }
+ 
+ pub struct PauseGate {
+@@ -612,12 +612,18 @@ impl GroupCredentials {
+             "[КРЕД #{}] Запрос (хеш: {short_hash}...)",
+             self.credential_id
+         );
++        let total_workers = self.context.params.workers.load(Ordering::Acquire);
++        let cohort_route = self
++            .context
++            .wan_router
++            .socks5_proxy_for_credential(self.credential_id, total_workers)
++            .await;
+         let fetched = tokio::select! {
+             _ = self.context.cancel.cancelled() => return None,
+             _ = self.availability.cancel.cancelled() => return None,
+             result = tokio::time::timeout(
+                 CREDENTIAL_FETCH_TIMEOUT,
+-                self.context.auth.get_credentials(&self.hash, credential_stream_id),
++                self.context.auth.get_credentials_for_cohort(&self.hash, credential_stream_id, cohort_route),
+             ) => result.unwrap_or_else(|_| Err(anyhow::anyhow!(
+                 "VK не вернул credential за {CREDENTIAL_FETCH_TIMEOUT:?}"
+             ))),
+@@ -860,7 +866,12 @@ async fn worker_loop(
+         let (allocation_tx, mut allocation_rx) = oneshot::channel();
+         let session_cancel = worker_cancel.child_token();
+         let creds_cancel = group_creds.cancellation_token();
+-        let mut session = Box::pin(run_session(
++        let total_workers = context.params.workers.load(Ordering::Acquire);
++        let wan_mark = context
++            .wan_router
++            .assign_worker(id, total_workers)
++            .map(|t| t.mark);
++        let mut session = Box::pin(crate::session::run_session_with_wan_mark(
+             session_config,
+             credential_lease.value.clone(),
+             SessionRuntime {
+@@ -882,12 +893,15 @@ async fn worker_loop(
+                 target_workers: Some(context.params.workers.clone()),
+                 configured_workers: context.params.configured_workers,
+             },
++            wan_mark,
+         ));
+         let mut allocation_started_observed = false;
+         let mut allocation_observed = false;
+         let mut ready_observed = false;
+         let mut was_ready = false;
+         let mut creds_cancel_observed = false;
++        let mut wan_cancel_observed = false;
++        let mut wan_swapped = false;
+         let result = loop {
+             tokio::select! {
+                 result = &mut session => break result,
+@@ -895,10 +909,16 @@ async fn worker_loop(
+                     creds_cancel_observed = true;
+                     session_cancel.cancel();
+                 }
++                _ = context.wan_router.wait_worker_cancel(id), if !wan_cancel_observed => {
++                    wan_cancel_observed = true;
++                    wan_swapped = true;
++                    session_cancel.cancel();
++                }
+                 ready = &mut ready_rx, if !ready_observed => {
+                     ready_observed = true;
+                     if ready.is_ok() {
+                         was_ready = true;
++                        context.wan_router.on_worker_ready(id, wan_mark);
+                         if let Some(sender) = &context.ready_credential_tx {
+                             let _ = sender.send(group_creds.credential_id);
+                         }
+@@ -919,6 +939,7 @@ async fn worker_loop(
+                 }
+             }
+         };
++        context.wan_router.on_worker_down(id);
+         group_creds.release_allocation(&credential_lease).await;
+         if was_ready {
+             attempt = 0;
+@@ -937,6 +958,9 @@ async fn worker_loop(
+         if context.paused.is_paused() {
+             continue;
+         }
++        if wan_swapped {
++            continue;
++        }
+         let mut delay = worker_retry_delay(attempt.max(1));
+         if let Err(error) = &result {
+             let message = error.to_string();

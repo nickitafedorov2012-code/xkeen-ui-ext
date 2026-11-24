@@ -3,6 +3,7 @@ import { apiGet, apiPost, apiPut, runWhitelistDetectorCheck, detectWhitelistServ
 import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult, type ProviderInfo, type ServerInfo } from '../types'
 import { formatQuotaBytes } from './Servers'
 import TrafficGraph from './TrafficGraph'
+import { MultiWanWidget } from './MultiWanWidget'
 
 interface Props {
   status: StatusInfo | null
@@ -452,6 +453,8 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
       {/* График трафика в реальном времени */}
       <TrafficGraph notify={notify} />
+
+      <MultiWanWidget onSwitchTab={onSwitchTab} />
 
       {/* Оперативные виджеты */}
       <div className="grid2">

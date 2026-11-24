@@ -11,6 +11,8 @@ pub mod dns_adguard;
 pub use dns_adguard::*;
 pub mod domains;
 pub use domains::*;
+pub mod multiwan;
+pub use multiwan::*;
 pub mod router;
 pub mod routing;
 pub use routing::*;

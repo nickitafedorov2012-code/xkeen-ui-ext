@@ -12,6 +12,7 @@ import {
   type StatusInfo,
 } from '../types'
 import { TrafficSummaryCard } from './settings/TrafficSummaryCard'
+import { MultiWanCard } from './settings/MultiWanCard'
 import { FailoverSection } from './settings/FailoverSection'
 import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
@@ -840,6 +841,8 @@ export default function Settings({ notify, status, refresh }: Props) {
         fmtTrafficBytes={fmtTrafficBytes}
         handleResetTraffic={handleResetTraffic}
       />
+
+      <MultiWanCard notify={notify} />
 
       <div className="settings-columns">
         {/* FAILOVER КАРТОЧКА */}

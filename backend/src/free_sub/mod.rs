@@ -68,7 +68,7 @@ pub const MAX_PER_ENDPOINT_IN_POOL: usize = 2;
 pub const REAL_TRAFFIC_PRIORITY_BYTES: u64 = 1_048_576;
 pub const MAX_SESSION_HISTORY: usize = 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FreeSubMode {
     Vpn,
@@ -1720,8 +1720,49 @@ static ACTIVE_SESSION_TRAFFIC_BASE: std::sync::LazyLock<Mutex<Option<(FreeSubMod
     std::sync::LazyLock::new(|| Mutex::new(None));
 static STALL_WATCHDOG_STREAK: std::sync::LazyLock<Mutex<(Option<String>, u8)>> =
     std::sync::LazyLock::new(|| Mutex::new((None, 0)));
+static WATCHDOG_DEAD_NODES: std::sync::LazyLock<std::sync::Mutex<HashMap<FreeSubMode, HashSet<String>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static LAST_MANUAL_POOL_SWITCH_TS: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+
+fn record_watchdog_dead_node(mode: FreeSubMode, leaf: &str) {
+    let trimmed = leaf.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut guard = WATCHDOG_DEAD_NODES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.entry(mode).or_default().insert(trimmed.to_string());
+}
+
+fn clear_watchdog_dead_node(mode: FreeSubMode, leaf: &str) {
+    let trimmed = leaf.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut guard = WATCHDOG_DEAD_NODES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(set) = guard.get_mut(&mode) {
+        set.remove(trimmed);
+    }
+}
+
+fn is_watchdog_dead_node(mode: FreeSubMode, leaf: &str) -> bool {
+    let trimmed = leaf.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let guard = WATCHDOG_DEAD_NODES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(&mode).is_some_and(|set| set.contains(trimmed))
+}
+
+fn clear_watchdog_dead_nodes(mode: Option<FreeSubMode>) {
+    let mut guard = WATCHDOG_DEAD_NODES.lock().unwrap_or_else(|e| e.into_inner());
+    match mode {
+        Some(m) => {
+            guard.remove(&m);
+        }
+        None => guard.clear(),
+    }
+}
 
 fn record_manual_pool_switch_ts() {
     LAST_MANUAL_POOL_SWITCH_TS.store(chrono::Utc::now().timestamp(), Ordering::Release);
@@ -2052,17 +2093,23 @@ async fn publish_and_connect_with_mode(
     };
     let active_leaf_opt = active_leaf_owned.as_deref();
     let active_is_blacklisted = active_leaf_opt.is_some_and(|leaf| {
-        existing_nodes
-            .iter()
-            .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(leaf))
-            .map(|n| is_node_blacklisted(cache.mode_ref(mode), n, leaf, now_ts))
-            .unwrap_or_else(|| cache.mode_ref(mode).blacklist.get(leaf).is_some_and(|exp| *exp > now_ts))
+        is_watchdog_dead_node(mode, leaf)
+            || existing_nodes
+                .iter()
+                .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(leaf))
+                .map(|n| is_node_blacklisted(cache.mode_ref(mode), n, leaf, now_ts))
+                .unwrap_or_else(|| cache.mode_ref(mode).blacklist.get(leaf).is_some_and(|exp| *exp > now_ts))
     });
+    let active_leaf_for_merge = if active_is_blacklisted {
+        None
+    } else {
+        active_leaf_opt
+    };
 
     let (final_nodes, preserved_active) = merge_verified_with_pool_checked(
         verified_nodes,
         &existing_nodes,
-        active_leaf_opt,
+        active_leaf_for_merge,
         cache.mode_ref(mode),
         now_ts,
         preserve_existing_pool,
@@ -4295,6 +4342,7 @@ async fn switch_pool_node_internal(
     mihomo::switch_server(&state.http, &cfg, &chosen).await?;
     crate::failover::record_manual_switch(&chosen).await;
     if is_manual {
+        clear_watchdog_dead_node(mode, &chosen);
         record_manual_pool_switch_ts();
     }
     let yaml_now = tokio::fs::read_to_string(&cfg.mihomo.config_path)
@@ -4377,6 +4425,9 @@ pub async fn blacklist_and_next_with_ttl(
         .iter()
         .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(target_name.as_str()));
     let reason = if ttl_secs >= BLACKLIST_TTL_SECS { "ЧС" } else { "Обрыв" };
+    if ttl_secs >= WATCHDOG_BLACKLIST_TTL_SECS {
+        record_watchdog_dead_node(mode, &target_name);
+    }
     update_disk_cache(&cp, |cache| {
         blacklist_node_in_cache_ttl(cache.mode_mut(mode), proxy_opt, &target_name, now_ts, ttl_secs);
         if pool_was_active {
@@ -4430,6 +4481,7 @@ pub async fn reset_free_sub_runtime_and_cache(state: &AppState) {
     *ACTIVE_SESSION_TRAFFIC_BASE.lock().await = None;
     *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
     *IDLE_PROBE_TICKS.lock().await = (None, 0);
+    clear_watchdog_dead_nodes(None);
     LAST_AUTO_UPGRADE_TS.lock().await.clear();
     L7_RECENT_FAILS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     LAST_BG_REFILL_FAIL_TS.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -5004,6 +5056,7 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
             count * 5,
             node_conns
         );
+        record_watchdog_dead_node(mode, &leaf_name);
         match blacklist_and_next_with_ttl(state, mode, Some(&leaf_name), WATCHDOG_BLACKLIST_TTL_SECS).await {
             Ok(res) if res.refill_started => {
                 log_w!(
@@ -5433,6 +5486,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let res = sync_mode_whitelist_state(&state, FreeSubMode::Whitelist, Some("Node-1")).await;
@@ -5667,6 +5721,7 @@ mod tests {
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // Сбрасываем глобальное состояние статуса на случай параллельных тестов free_sub
@@ -5801,6 +5856,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let res = get_pool_and_history(&state, FreeSubMode::Whitelist).await;
@@ -6010,6 +6066,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let chosen = switch_pool_node(&state, FreeSubMode::Whitelist, "next").await.unwrap();
@@ -6146,6 +6203,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // Занимаем run-lock чтобы не запускать реальные сетевые источники в фоне
@@ -6220,6 +6278,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let res = blacklist_and_next(&state, FreeSubMode::Whitelist, Some("banned-leaf"))
@@ -6305,6 +6364,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         enable_both_free_subs(&state).await.expect("enable_both_free_subs ok");
@@ -6343,6 +6403,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
         check_free_sub_stall_watchdog(&state).await;
         update_status(FreeSubMode::Whitelist, |st| {
@@ -6449,6 +6510,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let chosen = switch_pool_node(&state, FreeSubMode::Whitelist, "node-b").await.unwrap();
@@ -6565,6 +6627,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let pool = get_pool_and_history(&state, FreeSubMode::Whitelist).await;
@@ -6596,6 +6659,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         reset_free_sub_runtime_and_cache(&state).await;
@@ -6899,6 +6963,7 @@ proxies:
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         sync_mode_whitelist_state(&state, FreeSubMode::Whitelist, Some("🇷🇺 VK — #2"))
@@ -7219,6 +7284,7 @@ proxies:
             speedtest_lock: Arc::new(Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // Неактивный режим не должен падать или перехватывать сервер
@@ -7243,5 +7309,43 @@ proxies:
         srv_handle.abort();
         crate::mihomo::invalidate_proxies_cache();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_watchdog_dead_node_never_preserved_active_after_amnesty() {
+        clear_watchdog_dead_nodes(Some(FreeSubMode::Whitelist));
+        let dead_name = "dead-watchdog-node";
+        record_watchdog_dead_node(FreeSubMode::Whitelist, dead_name);
+        assert!(is_watchdog_dead_node(FreeSubMode::Whitelist, dead_name));
+        assert!(!is_watchdog_dead_node(FreeSubMode::Vpn, dead_name));
+
+        // Даже после амнистии (blacklist пуст), publish_and_connect_with_mode не должен передавать dead_name в active_leaf_for_merge
+        let mc = ModeCache::default();
+        let existing_nodes = vec![serde_json::json!({"name": dead_name, "type": "vless", "server": "1.2.3.4", "port": 443})];
+        let verified = vec![serde_json::json!({"name": "fresh-ok-node", "type": "vless", "server": "5.6.7.8", "port": 443})];
+        let now_ts = 1_700_000_000;
+        let active_is_blacklisted = is_watchdog_dead_node(FreeSubMode::Whitelist, dead_name)
+            || existing_nodes
+                .iter()
+                .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(dead_name))
+                .map(|n| is_node_blacklisted(&mc, n, dead_name, now_ts))
+                .unwrap_or(false);
+        assert!(active_is_blacklisted);
+        let active_leaf_for_merge = if active_is_blacklisted { None } else { Some(dead_name) };
+        let (merged, preserved) = merge_verified_with_pool_checked(
+            verified,
+            &existing_nodes,
+            active_leaf_for_merge,
+            &mc,
+            now_ts,
+            false,
+        );
+        assert!(!preserved, "Помеченный watchdog узел не должен возвращаться как preserved_active даже после амнистии");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["name"], "fresh-ok-node");
+
+        // Ручное переключение на узел очищает пометку
+        clear_watchdog_dead_node(FreeSubMode::Whitelist, dead_name);
+        assert!(!is_watchdog_dead_node(FreeSubMode::Whitelist, dead_name));
     }
 }

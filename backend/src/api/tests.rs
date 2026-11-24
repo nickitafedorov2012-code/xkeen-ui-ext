@@ -516,6 +516,7 @@ mod settings_and_service_regression_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let updated = super::super::sync_all_mobile_providers(&state).await;
@@ -841,6 +842,7 @@ rules:
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let app = crate::build_app_router(state);
@@ -2390,6 +2392,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // Calling apply_zapret_conf_save with new zapret config content
@@ -2679,6 +2682,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // 1. Отмечаем активную подписку «геодема2» как подходящую для белых списков
@@ -2923,6 +2927,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let res = crate::api::zapret::zapret_set_enabled_core(&state, false).await;
@@ -2975,6 +2980,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // 1. UI-старт без S51zapret: ошибка (через zapret_set_enabled_core), enabled остаётся false
@@ -3343,6 +3349,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let req = crate::api::routing::SaveSchedulesReq {
@@ -3455,6 +3462,7 @@ mod core_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         // 1. Выключаем одно из двух игровых устройств -> общий gaming.enabled должен остаться true

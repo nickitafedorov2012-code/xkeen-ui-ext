@@ -103,6 +103,7 @@ pub struct VkTurnRuntime {
     pub dtls_ok_streams: u32,
     /// Число потоков, упавших в WRAP-SRTP (входящих 0) / ошибку DTLS в текущем запуске.
     pub dtls_fallback_streams: u32,
+    pub wan_streams: std::collections::BTreeMap<String, i32>,
     #[serde(skip)]
     pub(super) dtls_ok_workers: BTreeSet<u32>,
     #[serde(skip)]
@@ -141,6 +142,7 @@ impl Default for VkTurnRuntime {
             active_transport: "udp",
             dtls_ok_streams: 0,
             dtls_fallback_streams: 0,
+            wan_streams: std::collections::BTreeMap::new(),
             dtls_ok_workers: BTreeSet::new(),
             dtls_fallback_workers: BTreeSet::new(),
             run_generation: 0,
@@ -392,6 +394,12 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
             }
             if let Some(down) = json.get("bytes_down").and_then(|v| v.as_i64()) {
                 rt.bytes_down = down.max(0) as u64;
+            }
+            if let Some(ws) = json.get("wan_streams").and_then(|v| v.as_object()) {
+                rt.wan_streams = ws
+                    .iter()
+                    .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n as i32)))
+                    .collect();
             }
             rt.connected_streams = active;
             if active > 0 {

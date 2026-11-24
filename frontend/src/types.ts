@@ -1186,6 +1186,8 @@ export interface VkTurnStatus {
   dtls_ok_streams?: number
   /** Число потоков, откатившихся с DTLS на обычный WRAP-SRTP */
   dtls_fallback_streams?: number
+  /** Распределение активных потоков по WAN-каналам (fwmark -> число потоков) */
+  wan_streams?: Record<string, number>
   /** Фоновая установка компонента (ядра) */
   install?: VkTurnCoreInstall
 }
@@ -1227,3 +1229,55 @@ export interface VkTurnActionResponse {
   [key: string]: unknown
 }
 
+
+export type MultiWanWeightMode = 'auto' | 'manual'
+export type MultiWanKind = 'modem' | 'wisp' | 'ethernet'
+export type MultiWanChannelState = 'online' | 'offline' | 'standby' | 'quarantine'
+
+export interface MultiWanChannelStatus {
+  rci_id: string
+  name: string
+  kind: MultiWanKind
+  linux_iface: string
+  ipv4: string
+  gateway: string
+  slot: number
+  table_id: number
+  fwmark_hex: string
+  enabled: boolean
+  state: MultiWanChannelState
+  flapping: boolean
+  rx_mbps: number
+  tx_mbps: number
+  rtt_ms: number | null
+  loss_pct: number
+  manual_weight: number
+  effective_weight: number
+}
+
+export interface MultiWanStatus {
+  enabled: boolean
+  mode: MultiWanWeightMode
+  single_ip_subscriptions: boolean
+  active_count: number
+  total_rx_mbps: number
+  total_tx_mbps: number
+  wan_marks_spec: string
+  gateway_collision_warning?: string | null
+  last_reconcile_ts: number
+  last_error: string | null
+  channels: MultiWanChannelStatus[]
+}
+
+export interface MultiWanChannelConfig {
+  rci_id: string
+  weight: number
+  enabled: boolean
+}
+
+export interface MultiWanConfig {
+  enabled: boolean
+  mode: MultiWanWeightMode
+  single_ip_subscriptions: boolean
+  channels: MultiWanChannelConfig[]
+}

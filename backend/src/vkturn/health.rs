@@ -85,6 +85,10 @@ pub struct VkTurnManager {
     active_supervisors: Arc<std::sync::atomic::AtomicUsize>,
     /// Фоновая установка ядра: скачивание идёт дольше таймаута запроса веб-панели (30 с).
     pub install: Arc<std::sync::Mutex<CoreInstall>>,
+    /// Канал отправки горячих команд (`WAN_MARKS|...`, `SCALE_WORKERS|...`) в stdin живого csqtt-client.
+    stdin_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Актуальная строка `--wan-marks` для передачи при старте/перезапуске клиента.
+    wan_marks_spec: Mutex<String>,
 }
 
 /// Состояние фоновой установки ядра для статуса VK-туннеля.
@@ -182,7 +186,22 @@ impl VkTurnManager {
             core_path: path.into(),
             active_supervisors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             install: Arc::new(std::sync::Mutex::new(CoreInstall::default())),
+            stdin_tx: Mutex::new(None),
+            wan_marks_spec: Mutex::new(String::new()),
         })
+    }
+
+    pub async fn send_wan_marks(&self, spec: &str) {
+        *self.wan_marks_spec.lock().await = spec.to_string();
+        if let Some(tx) = self.stdin_tx.lock().await.as_ref() {
+            let _ = tx.send(format!("WAN_MARKS|{spec}\n"));
+        }
+    }
+
+    pub async fn send_scale_workers(&self, workers: usize) {
+        if let Some(tx) = self.stdin_tx.lock().await.as_ref() {
+            let _ = tx.send(format!("SCALE_WORKERS|{workers}\n"));
+        }
     }
 
     pub fn install_state(&self) -> CoreInstall {
@@ -366,7 +385,13 @@ impl VkTurnManager {
             let uds_name = new_tun_uds_name();
             let mut transport_switched = false;
             let mut cmd = tokio::process::Command::new(&self.core_path);
-            cmd.args(build_client_args_for_uds_with_transport(&cfg, &hashes, &uds_name, active_transport))
+            let mut args = build_client_args_for_uds_with_transport(&cfg, &hashes, &uds_name, active_transport);
+            let wan_spec = self.wan_marks_spec.lock().await.clone();
+            if !wan_spec.is_empty() {
+                args.push("--wan-marks".into());
+                args.push(wan_spec);
+            }
+            cmd.args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -429,6 +454,8 @@ impl VkTurnManager {
             }
             drop(eff_tx);
             let mut stdin = child.stdin.take();
+            let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<String>();
+            *self.stdin_tx.lock().await = Some(ctrl_tx);
             let mut fd_handoff: Option<FdHandoff> = None;
             let mut handoff_recovery = HandoffRecovery::new();
 
@@ -444,7 +471,14 @@ impl VkTurnManager {
             let exit_reason = loop {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
+                    Some(cmd_line) = ctrl_rx.recv() => {
+                        if let Some(si) = stdin.as_mut() {
+                            let _ = si.write_all(cmd_line.as_bytes()).await;
+                            let _ = si.flush().await;
+                        }
+                    }
                     _ = stop_rx.changed() => {
+                        *self.stdin_tx.lock().await = None;
                         eff_rx.close();
                         log_tasks.stop().await;
                         if let Some(handoff) = fd_handoff.take() { handoff.stop().await; }
@@ -564,6 +598,7 @@ impl VkTurnManager {
                 }
             };
 
+            *self.stdin_tx.lock().await = None;
             eff_rx.close();
             log_tasks.stop().await;
             self.begin_run().await;

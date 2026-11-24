@@ -945,6 +945,7 @@ fn test_state(root: &std::path::Path, mgr: Arc<VkTurnManager>, mihomo_port: u16)
         zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag,
         vkturn: mgr,
+        multiwan: crate::multiwan::MultiWanManager::new(),
     }
 }
 

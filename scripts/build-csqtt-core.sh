@@ -30,6 +30,9 @@ git -C "$SRC" fetch --quiet origin "$CSQTT_COMMIT" 2>/dev/null || true
 git -C "$SRC" checkout --quiet --force "$CSQTT_COMMIT"
 git -C "$SRC" clean -fdq rust-client
 
+# Патч Multi-WAN & Hot-Swap (SO_MARK, локальный SOCKS5-форвардер когорт, SCALE_WORKERS)
+git -C "$SRC" apply --whitespace=nowarn "$HERE/csqtt-router-patch/multiwan.patch"
+
 # Патч для роутера: без Lua в Gooby
 sed -i '/^mlua = /d' "$SRC/rust-client/vendor/gooby/Cargo.toml"
 cp "$HERE/csqtt-router-patch/gooby_lua_stub.rs" "$SRC/rust-client/vendor/gooby/src/lua.rs"

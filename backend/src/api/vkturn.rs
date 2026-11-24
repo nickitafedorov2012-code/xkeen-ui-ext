@@ -63,6 +63,7 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "active_transport": rt.active_transport,
         "dtls_ok_streams": rt.dtls_ok_streams,
         "dtls_fallback_streams": rt.dtls_fallback_streams,
+        "wan_streams": rt.wan_streams,
         "has_token": v.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
         "has_profile_token": v.profile_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
         "vk_token": v.vk_token.as_ref().map(|t| crate::vkturn::mask_vk_token(t)),

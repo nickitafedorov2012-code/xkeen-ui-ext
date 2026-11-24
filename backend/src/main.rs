@@ -15,6 +15,7 @@ mod override_sync;
 mod cdn_discovery;
 mod antigravity;
 pub mod vkturn;
+pub mod multiwan;
 mod auth;
 mod watchdog;
 mod speedtest;
@@ -114,6 +115,8 @@ pub struct AppState {
     pub antigravity: Arc<antigravity::AntigravityManager>,
     /// Менеджер VK-туннеля (Tier 2 Whitelist Turn proxy).
     pub vkturn: Arc<vkturn::VkTurnManager>,
+    /// Менеджер Multi-WAN балансировки и хотсвапа.
+    pub multiwan: Arc<multiwan::MultiWanManager>,
 }
 
 /// Координатор канонического порядка блокировок (`config_lock` -> `routing_lock`),
@@ -463,6 +466,7 @@ async fn main() {
         zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag_mgr,
         vkturn: vkturn_mgr,
+        multiwan: multiwan::MultiWanManager::new(),
     };
 
     // FO-QUR-01: Восстановление состояния карантина из каталога рядом с config.json
@@ -498,6 +502,8 @@ async fn main() {
     bot::spawn(state.clone());
 
     // AUDIT-122: автостарт mihomo после перезагрузки роутера, если S05xkeen отсутствует или не поднял ядро
+    multiwan::MultiWanManager::spawn_supervisor(state.clone());
+
     let mihomo_autostart_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -931,6 +937,7 @@ async fn main() {
     }
     log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
     shutdown::global().cancel();
+    state.multiwan.shutdown().await;
     state.vkturn.stop().await;
     antigravity::shutdown();
     failover::shutdown();

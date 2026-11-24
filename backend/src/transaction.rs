@@ -1298,6 +1298,7 @@ mod tests {
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
         (state, yaml_path, json_path)
     }

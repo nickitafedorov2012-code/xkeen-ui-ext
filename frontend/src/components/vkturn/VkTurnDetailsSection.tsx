@@ -1,8 +1,26 @@
-import React, { useEffect, useRef } from 'react'
-import type { VkTurnPhase, VkTurnStatus } from '../../types'
+import React, { useEffect, useRef, useState } from 'react'
+import { apiGet } from '../../api'
+import type { MultiWanChannelStatus, MultiWanStatus, VkTurnPhase, VkTurnStatus } from '../../types'
+
+export function formatWanStreamLabel(markKey: string, channels: MultiWanChannelStatus[]): string {
+  const norm = markKey.trim().toLowerCase()
+  const matched = channels.find((c) => c.fwmark_hex.trim().toLowerCase() === norm)
+  if (matched) {
+    return `Канал ${matched.slot + 1} (${matched.name})`
+  }
+  const parsed = Number.parseInt(norm.replace(/^0x/, ''), 16)
+  if (Number.isFinite(parsed) && parsed > 0) {
+    const slot = (parsed >>> 28)
+    if (slot > 0) {
+      return `Канал ${slot}`
+    }
+  }
+  return markKey
+}
 
 export interface VkTurnDetailsSectionProps {
   status: VkTurnStatus | null
+  multiwanChannels?: MultiWanChannelStatus[]
   phase: VkTurnPhase
   showPasswordFix: boolean
   accordionOpen: boolean
@@ -40,6 +58,7 @@ export interface VkTurnDetailsSectionProps {
 
 export function VkTurnDetailsSection({
   status,
+  multiwanChannels,
   phase,
   showPasswordFix,
   accordionOpen,
@@ -76,6 +95,25 @@ export function VkTurnDetailsSection({
 }: VkTurnDetailsSectionProps) {
   const fetchLogsRef = useRef(fetchLogs)
   fetchLogsRef.current = fetchLogs
+  const [fetchedChannels, setFetchedChannels] = useState<MultiWanChannelStatus[]>([])
+
+  const hasWanStreams = Boolean(status?.wan_streams && Object.keys(status.wan_streams).length > 0)
+  useEffect(() => {
+    if (multiwanChannels || !hasWanStreams) return
+    let active = true
+    void apiGet<MultiWanStatus>('multiwan/status')
+      .then((mw) => {
+        if (active && Array.isArray(mw?.channels)) {
+          setFetchedChannels(mw.channels)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [multiwanChannels, hasWanStreams])
+
+  const channelsList = multiwanChannels ?? fetchedChannels
 
   // Баг #1: при открытой вкладке/аккордеоне «Логи службы (Tail)» автоматически обновляем логи
   useEffect(() => {
@@ -191,6 +229,11 @@ export function VkTurnDetailsSection({
               {`Активен: ${(status?.active_transport ?? (status?.turn_transport === 'tcp' ? 'tcp' : 'udp')).toUpperCase()}`}
               {(status?.dtls_ok_streams ?? 0) + (status?.dtls_fallback_streams ?? 0) > 0
                 ? ` · DTLS: ${status?.dtls_ok_streams ?? 0}✓ / ${status?.dtls_fallback_streams ?? 0} fallback`
+                : ''}
+              {status?.wan_streams && Object.keys(status.wan_streams).length > 0
+                ? ` · Потоки по WAN: ${Object.entries(status.wan_streams)
+                    .map(([k, v]) => `${formatWanStreamLabel(k, channelsList)}: ${v} пот.`)
+                    .join(' · ')}`
                 : ''}
             </span>
           </div>

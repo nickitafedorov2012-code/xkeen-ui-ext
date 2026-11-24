@@ -205,6 +205,10 @@ fn zapret_and_vkturn_routes() -> Router<AppState> {
         .route("/api/vkturn/action", post(api::vkturn_action))
         .route("/api/vkturn/auth/save", post(api::save_vkturn_auth))
         .route("/api/vkturn/auth/logout", post(api::logout_vkturn_auth))
+        .route("/api/multiwan/status", get(api::get_multiwan_status))
+        .route("/api/multiwan/config", post(api::post_multiwan_config))
+        .route("/api/multiwan/reconcile", post(api::post_multiwan_reconcile))
+        .route("/api/multiwan/test-probe", post(api::post_multiwan_test_probe))
 }
 
 fn gaming_and_adguard_routes() -> Router<AppState> {

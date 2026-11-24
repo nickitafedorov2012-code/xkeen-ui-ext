@@ -743,6 +743,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc)),
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         let start = std::time::Instant::now();

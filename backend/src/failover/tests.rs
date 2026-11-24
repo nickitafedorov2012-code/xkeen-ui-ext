@@ -121,6 +121,7 @@ async fn regression_bug_108_whitelist_transition_is_atomic() {
         zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag,
         vkturn: crate::vkturn::VkTurnManager::new(),
+        multiwan: crate::multiwan::MultiWanManager::new(),
     };
 
     handle_whitelist_transition(&state, "bs-node", "bs-node", None).await;
@@ -2762,6 +2763,7 @@ async fn test_stress_active_only_polling_zero_pool_pings_when_healthy() {
         zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
         vkturn: crate::vkturn::VkTurnManager::new(),
+        multiwan: crate::multiwan::MultiWanManager::new(),
     };
 
     let res = run_check(&state).await;
@@ -2880,6 +2882,7 @@ async fn test_stress_whitelist_episode_lifecycle_and_transition_retention() {
         zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
         vkturn: crate::vkturn::VkTurnManager::new(),
+        multiwan: crate::multiwan::MultiWanManager::new(),
     };
 
     // 1. Initial State

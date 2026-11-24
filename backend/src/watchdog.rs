@@ -2360,6 +2360,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         assert!(apply_smart_gaming_toggle(&state, true).await.is_err(), "отказ ядра — ошибка, а не тихий успех");
@@ -2400,6 +2401,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         disable_zapret_after_failed_starts(&state).await.unwrap();
@@ -2444,6 +2446,7 @@ mod tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         crate::api::persist_zapret_enabled_with_routing(&state, true).await.unwrap();
@@ -2965,6 +2968,7 @@ mod structural_regression_tests {
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
             vkturn: crate::vkturn::VkTurnManager::new(),
+            multiwan: crate::multiwan::MultiWanManager::new(),
         };
 
         assert!(super::apply_smart_gaming_toggle(&state, false).await.is_err());
