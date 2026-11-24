@@ -276,28 +276,30 @@ pub async fn sync_default_policy_isolation(state: &crate::AppState) {
     sync_default_policy_isolation_with_data(state, &cfg, &policies, &devices).await;
 }
 
-async fn rebuild_and_reload_mihomo(state: &crate::AppState, cfg: &AppConfig) {
-    let _guard = state.routing_lock.lock().await;
-    let yaml_path = std::path::Path::new(&cfg.mihomo.config_path);
-    let Ok(raw_yaml) = tokio::fs::read_to_string(yaml_path).await else {
+async fn rebuild_and_reload_mihomo(state: &crate::AppState, _cfg: &AppConfig) {
+    let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await else {
         return;
     };
-    let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, cfg) else {
+    if !(tx.config().whitelist.enabled
+        && tx.config().whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen)
+    {
+        return;
+    }
+    let Ok(raw_yaml) = tx.read_yaml().await else {
+        return;
+    };
+    let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, tx.config()) else {
         return;
     };
     if new_yaml == raw_yaml {
         return;
     }
-    if crate::transaction::validate_yaml_syntax(&new_yaml).is_err() {
-        crate::log_w!("[POLICY-ISOLATION] Сгенерированный YAML не прошёл валидацию, пропуск");
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        crate::log_w!("[POLICY-ISOLATION] Сгенерированный YAML не прошёл валидацию, пропуск: {e}");
         return;
     }
-    if let Err(e) = tokio::fs::write(yaml_path, &new_yaml).await {
-        crate::log_w!("[POLICY-ISOLATION] Ошибка записи {}: {e}", yaml_path.display());
-        return;
-    }
-    if let Err(e) = crate::mihomo::reload_config(&state.http, cfg).await {
-        crate::log_w!("[POLICY-ISOLATION] Ошибка reload Mihomo: {e}");
+    if let Err(e) = tx.commit_and_reload().await {
+        crate::log_w!("[POLICY-ISOLATION] Ошибка commit_and_reload Mihomo: {e}");
     } else {
         crate::log_i!("[POLICY-ISOLATION] Правила изоляции default-политики обновлены в Mihomo");
     }
@@ -419,5 +421,46 @@ mod tests {
             !after_move_to_policy0.contains("192.168.2.52/32,DIRECT"),
             "moving device out of default must remove its DIRECT isolation rule"
         );
+    }
+
+    #[tokio::test]
+    async fn regression_policy_isolation_uses_config_tx_and_skips_when_whitelist_disabled() {
+        let dir = std::env::temp_dir().join(format!("policy_iso_tx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        let json_path = dir.join("config.json");
+        let original_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, original_yaml).unwrap();
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = false;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        crate::config::save(&json_path, &cfg).await.unwrap();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg.clone())));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = crate::AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let mut stale_cfg = cfg;
+        stale_cfg.whitelist.enabled = true;
+        rebuild_and_reload_mihomo(&state, &stale_cfg).await;
+
+        assert_eq!(std::fs::read_to_string(&yaml_path).unwrap(), original_yaml);
+        assert!(state.config_lock.try_lock().is_ok());
+        assert!(state.routing_lock.try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

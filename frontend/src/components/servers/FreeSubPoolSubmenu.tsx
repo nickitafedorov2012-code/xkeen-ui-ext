@@ -296,7 +296,7 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open, freeSubStatu
                     {rec.host}:{rec.port} · ⏱ {formatDuration(rec.duration_secs)} · ↓ {formatQuotaBytes(rec.down_bytes)} / ↑ {formatQuotaBytes(rec.up_bytes)}
                   </div>
                 </div>
-                {rec.end_reason !== 'Активен' && (
+                {rec.end_reason !== 'Активен' && rec.node_name !== pool.active_node && (
                   <button
                     type="button"
                     className="btn sm ghost"

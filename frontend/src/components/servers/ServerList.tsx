@@ -638,9 +638,23 @@ export function ServerList({
       ) : (
         /* КОМПАКТНЫЙ ВИД (ОДНОСТРОЧНАЯ ТАБЛИЦА) */
         <div className={`server-compact-list cols-${columns}`}>
-          {filtered.slice(0, limit).map((s) => (
-            <div key={s.id} className={'server-compact-row' + (s.is_active ? ' active' : '')}>
-              <span className="badge" style={{ minWidth: 46, textAlign: 'center' }}>
+          {filtered.slice(0, limit).map((s) => {
+            const isFreeSub = s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
+            const compactMode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+            const compactStatus = isFreeSub
+              ? (freeSubStatuses[compactMode] ?? (freeSubStatus?.mode === compactMode ? freeSubStatus : null))
+              : null
+            const compactRunning = Boolean(compactStatus?.running)
+            const compactExpanded = Boolean(expandedFreeSubIds[s.id])
+            const showCompactProgress = Boolean(
+              compactStatus &&
+              compactStatus.mode === compactMode &&
+              (compactStatus.running || (compactStatus.stage === 'error' && Boolean(compactStatus.error)))
+            )
+            return (
+            <React.Fragment key={s.id}>
+            <div className={'server-compact-row' + (s.is_active ? ' active' : '')}>
+              <span className="badge" style={{ minWidth: 46, textAlign: 'center', whiteSpace: 'nowrap', flexShrink: 0 }}>
                 {s.protocol}
               </span>
               {s.provider && (
@@ -676,7 +690,7 @@ export function ServerList({
                 <span
                   className="server-compact-name"
                   title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 90 }}
                 >
                   <span>{s.custom_alias ? `${s.custom_alias} (${s.name})` : s.name}</span>
                   <button
@@ -725,13 +739,13 @@ export function ServerList({
               )}
               <span
                 className={'ping ' + pingClass(s.ping_ms)}
-                style={{ minWidth: 60, textAlign: 'right' }}
+                style={{ minWidth: 44, textAlign: 'right', whiteSpace: 'nowrap' }}
               >
                 {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
               </span>
               <Sparkline ping={s.ping_ms} />
-              <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                {s.protocol === 'VK-CALL' ? (
+              <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center', flexShrink: 0, marginLeft: 'auto' }}>
+                {!isFreeSub && (s.protocol === 'VK-CALL' ? (
                   <button
                     className="btn sm ghost"
                     onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
@@ -749,8 +763,8 @@ export function ServerList({
                   >
                     🔗
                   </button>
-                )}
-                {s.protocol !== 'FREE-VPN' && s.protocol !== 'FREE-WL' && (
+                ))}
+                {!isFreeSub && (
                   <button
                     className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
                     onClick={() => runSpeedtest(s)}
@@ -764,12 +778,13 @@ export function ServerList({
                 {s.is_active ? (
                   <>
                     <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
-                    {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (
+                    {isFreeSub && (
                       <button
                         type="button"
                         className="btn sm ghost"
+                        data-testid={`free-sub-disconnect-${compactMode}`}
                         disabled={freeSubBusyId === s.id}
-                        onClick={() => void handleFreeSubDisconnect(s, s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn')}
+                        onClick={() => void handleFreeSubDisconnect(s, compactMode)}
                         style={{ padding: '3px 6px' }}
                         title="Отключить"
                       >
@@ -777,28 +792,50 @@ export function ServerList({
                       </button>
                     )}
                   </>
-                ) : (() => {
-                  const compactMode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
-                  const compactRunning =
-                    (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
-                    Boolean((freeSubStatuses[compactMode] ?? (freeSubStatus?.mode === compactMode ? freeSubStatus : null))?.running)
-                  return (
+                ) : (
+                  <button
+                    className="btn sm btn-connect"
+                    disabled={isFreeSub && (freeSubBusyId === s.id || compactRunning)}
+                    onClick={() => {
+                      if (isFreeSub) {
+                        void handleFreeSubConnect(s)
+                      } else {
+                        activate(s)
+                      }
+                    }}
+                    style={{ padding: '3px 8px' }}
+                  >
+                    {compactRunning ? '⏳' : '🔌'}
+                  </button>
+                )}
+                {isFreeSub ? (
+                  <>
                     <button
-                      className="btn sm btn-connect"
-                      disabled={(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (freeSubBusyId === s.id || compactRunning)}
-                      onClick={() => {
-                        if (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') {
-                          void handleFreeSubConnect(s)
-                        } else {
-                          activate(s)
-                        }
-                      }}
-                      style={{ padding: '3px 8px' }}
+                      type="button"
+                      className={`btn sm ${compactExpanded ? 'primary' : 'ghost'}`}
+                      data-testid={`free-sub-toggle-${compactMode}`}
+                      onClick={() =>
+                        setExpandedFreeSubIds((prev) => ({ ...prev, [s.id]: !prev[s.id] }))
+                      }
+                      style={{ padding: '3px 8px', whiteSpace: 'nowrap' }}
+                      title="Управление пулом узлов и историей трафика"
                     >
-                      {compactRunning ? '⏳' : '🔌'}
+                      Узлы {compactExpanded ? '▴' : '▾'}
                     </button>
-                  )
-                })()}
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      data-testid={`free-sub-remove-${compactMode}`}
+                      disabled={freeSubBusyId === s.id}
+                      onClick={() => void handleFreeSubRemove(s, compactMode)}
+                      style={{ padding: '3px 6px' }}
+                      title="Удалить бесплатную подписку и её карточку"
+                    >
+                      🗑
+                    </button>
+                  </>
+                ) : (
+                  <>
                 {(() => {
                   const chainIdx = failoverChain.indexOf(s.id)
                   const isStart = chainIdx === 0
@@ -852,9 +889,47 @@ export function ServerList({
                     <span style={{ fontSize: 11 }}>Обычный</span>
                   </button>
                 )}
+                  </>
+                )}
               </div>
             </div>
-          ))}
+            {isFreeSub && (showCompactProgress || compactExpanded) && (
+              <div style={{ gridColumn: '1 / -1', marginBottom: 6 }}>
+                {showCompactProgress && compactStatus && (
+                  <div
+                    data-testid={`free-sub-progress-${compactMode}`}
+                    style={{
+                      marginBottom: compactExpanded ? 6 : 0,
+                      padding: '6px 10px',
+                      borderRadius: 8,
+                      fontSize: 11,
+                      background: compactStatus.stage === 'error' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(56, 189, 248, 0.1)',
+                      border: `1px solid ${compactStatus.stage === 'error' ? 'rgba(239, 68, 68, 0.35)' : 'rgba(56, 189, 248, 0.28)'}`,
+                      color: compactStatus.stage === 'error' ? '#fca5a5' : '#bae6fd',
+                    }}
+                  >
+                    {compactStatus.running ? '⏳ ' : '⚠️ '}
+                    {compactStatus.stage === 'error' && compactStatus.error
+                      ? compactStatus.error
+                      : compactStatus.stage_label || 'Поиск рабочих узлов…'}
+                  </div>
+                )}
+                <FreeSubPoolSubmenu
+                  mode={compactMode}
+                  notify={notify}
+                  onUpdated={() => onFreeSubChanged?.()}
+                  open={compactExpanded}
+                  freeSubStatus={compactStatus}
+                  onJobStarted={(m) => {
+                    startOptimisticFreeSub(m, 'Фоновый подбор свежих узлов…')
+                    void refreshFreeSubStatus()
+                  }}
+                />
+              </div>
+            )}
+            </React.Fragment>
+            )
+          })}
           {filtered.length > limit && (
             <button
               className="btn wide"

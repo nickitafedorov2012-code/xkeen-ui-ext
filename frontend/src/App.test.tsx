@@ -102,7 +102,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
       if (path === 'update/check') {
         return Promise.resolve({ current: 'v1.5.19', latest: 'v1.5.19', update_available: false })
       }
-      if (path === 'mihomo/releases') {
+      if (path.startsWith('mihomo/releases')) {
         return Promise.resolve({ current: 'v1.19.0', latest: 'v1.19.0', update_available: false })
       }
       if (path === 'zapret/update/check') {
@@ -530,7 +530,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
         if (path === 'update/check') {
           return Promise.resolve({ current: 'v1.5.19', latest: 'v1.5.19', update_available: false })
         }
-        if (path === 'mihomo/releases') {
+        if (path.startsWith('mihomo/releases')) {
           return Promise.resolve({ current: 'v1.19.0', latest: 'v1.19.0', update_available: false })
         }
         if (path === 'zapret/update/check') {

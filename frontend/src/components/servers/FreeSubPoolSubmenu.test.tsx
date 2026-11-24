@@ -465,4 +465,105 @@ describe('FreeSubPoolSubmenu & ServerList free-sub cards', () => {
       })
     }
   })
+
+  it('hides Reconnect button for active node history and supports free-sub in compact viewMode', async () => {
+    const mockGet = vi.mocked(api.apiGet)
+    mockGet.mockResolvedValue({
+      mode: 'whitelist',
+      provider_id: 'free_wl',
+      active_node: 'ActiveNode',
+      pool_index: 1,
+      pool_total: 2,
+      blacklist_count: 0,
+      nodes: [
+        { name: 'ActiveNode', host: '1.1.1.1', port: 443, ping_ms: 100, is_active: true },
+        { name: 'OtherNode', host: '2.2.2.2', port: 443, ping_ms: 120, is_active: false },
+      ],
+      history: [
+        {
+          node_name: 'ActiveNode',
+          host: '1.1.1.1',
+          port: 443,
+          started_at: 1700000100,
+          ended_at: 1700000150,
+          duration_secs: 50,
+          down_bytes: 1000,
+          up_bytes: 200,
+          end_reason: 'Отключён',
+        },
+        {
+          node_name: 'OtherNode',
+          host: '2.2.2.2',
+          port: 443,
+          started_at: 1700000000,
+          ended_at: 1700000090,
+          duration_secs: 90,
+          down_bytes: 2000,
+          up_bytes: 300,
+          end_reason: 'Переключён',
+        },
+      ],
+    })
+
+    const root = createRoot(container)
+    try {
+      await act(async () => {
+        root.render(
+          <FreeSubPoolSubmenu mode="whitelist" notify={vi.fn()} onUpdated={vi.fn()} open={true} />
+        )
+      })
+      expect(container.querySelector('[data-testid="free-sub-reconnect-0"]')).toBeNull()
+      expect(container.querySelector('[data-testid="free-sub-reconnect-1"]')).not.toBeNull()
+
+      const wlServer = makeFreeSubServer({
+        id: 'free_wl',
+        name: '🛡️ Бесплатный обход БС (Авто)',
+        protocol: 'FREE-WL',
+        provider: 'free_wl',
+        is_active: true,
+        is_whitelist: true,
+      })
+      await act(async () => {
+        root.render(
+          <ServerList
+            loading={false}
+            columns={1}
+            viewMode="compact"
+            filtered={[wlServer]}
+            limit={20}
+            pageSize={20}
+            setLimit={vi.fn()}
+            providerColorMap={new Map()}
+            failoverChain={[]}
+            ignored={new Set()}
+            speedResults={{}}
+            speedtestingId={null}
+            editingAliasId={null}
+            aliasInput=""
+            aliasSaving={false}
+            setEditingAliasId={vi.fn()}
+            setAliasInput={vi.fn()}
+            setShareServer={vi.fn()}
+            openProvidersModal={vi.fn()}
+            saveAlias={vi.fn()}
+            saveAliasWithVal={vi.fn()}
+            activate={vi.fn()}
+            runSpeedtest={vi.fn()}
+            toggleWhitelist={vi.fn()}
+            makeServerNormal={vi.fn()}
+            addToFailover={vi.fn()}
+            notify={vi.fn()}
+            onFreeSubChanged={vi.fn()}
+          />
+        )
+      })
+      expect(container.querySelector('[data-testid="free-sub-toggle-whitelist"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="free-sub-remove-whitelist"]')).not.toBeNull()
+      expect(container.querySelector('[title*="Ссылка подключения"]')).toBeNull()
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+    }
+  })
 })

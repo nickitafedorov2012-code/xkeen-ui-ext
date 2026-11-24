@@ -184,118 +184,125 @@ pub fn spawn(state: AppState) {
             };
 
             if file_changed {
-                let Ok(_routing_guard) = state.routing_lock.try_lock() else {
-                    continue;
-                };
-                last_mtime = mtime;
-                last_len = len;
-
-                // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    if is_own_yaml_write(&content) {
+                let (should_restore, meta_snapshot) = {
+                    let Ok(_routing_guard) = state.routing_lock.try_lock() else {
                         continue;
-                    }
-                    // BUG-16: Проверка эффективной необходимости вставок
-                    let has_active_device_assignments = device_routing.values().any(|dr| {
-                        dr.servers.first().is_some_and(|s| !s.trim().is_empty() && s.trim() != "default")
-                    }) || schedules.iter().any(|s| s.enabled)
-                       || (gaming_cfg.enabled && gaming_cfg.devices.iter().any(|d| d.enabled && d.server.as_ref().is_some_and(|s| !s.trim().is_empty())));
-                    let needs_device = has_active_device_assignments;
-                    let needs_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
-
-                    let needs_force = force_domains.iter().any(|d| {
-                        let clean = crate::config::normalize_domain(d);
-                        if clean.is_empty() || !clean.contains('.') {
-                            return false;
-                        }
-                        if direct_domains.iter().any(|dir| crate::config::normalize_domain(dir) == clean) {
-                            return false;
-                        }
-                        if zapret_cfg.enabled && routing::is_zapret_direct_domain(&clean, &zapret_cfg) {
-                            return false;
-                        }
-                        true
-                    });
-
-                    let needs_ignore = !ignore_servers.is_empty();
-                    let needs_flow = flow_server.as_ref().is_some_and(|s| !s.trim().is_empty());
-                    let needs_zapret = zapret_cfg.enabled
-                        && (zapret_cfg.hybrid_youtube
-                            || zapret_cfg.hybrid_discord
-                            || zapret_cfg.isolated_proxy
-                            || zapret_cfg.smart_tv_mode
-                            || zapret_cfg.bypass_github
-                            || zapret_cfg.bypass_torrents
-                            || zapret_cfg.bypass_adult
-                            || zapret_cfg.custom_entries.iter().any(|e| e.enabled));
-                    let needs_gaming = gaming_cfg.enabled;
-                    let needs_whitelist = whitelist_cfg.enabled;
-
-                    let missing_device = needs_device && !content.contains("AUTO-DEVICE");
-                    let missing_dev_domains = needs_dev_domains && !content.contains("AUTO-DEVICE-DOMAINS");
-                    let missing_force = needs_force && !content.contains("AUTO-FORCE");
-                    let missing_ignore = needs_ignore && !content.contains("exclude-filter:");
-                    let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
-                    let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
-                    let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
-                    let missing_gaming = needs_gaming && !content.contains("AUTO-GAMING");
-                    let missing_whitelist = needs_whitelist && !content.contains("AUTO-WHITELIST");
-
-                    if missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming || missing_whitelist {
-                        log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
-
-                        // BUG-15 / ConfigTx: строгий порядок блокировок и авто-откат при сбое reload Mihomo
-                        let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
-                            Ok(tx) => tx,
-                            Err(e) => {
-                                log_w!("[WATCHDOG] Ошибка захвата транзакции: {}", e);
-                                continue;
-                            }
-                        };
-
-                        let raw_yaml = match tx.read_yaml().await {
-                            Ok(c) => c,
-                            Err(e) => {
-                                log_w!("[WATCHDOG] Ошибка чтения config.yaml: {}", e);
-                                continue;
-                            }
-                        };
-
-                        let (new_yaml, _applied) = match routing::apply_routing(&raw_yaml, tx.config()) {
-                            Ok(res) => res,
-                            Err(e) => {
-                                log_w!("[WATCHDOG] Ошибка роутинга: {}", e);
-                                continue;
-                            }
-                        };
-                        if let Err(e) = tx.set_yaml(new_yaml) {
-                            log_w!("[WATCHDOG] Ошибка валидации config.yaml: {}", e);
+                    };
+                    let mut restore = false;
+                    // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
+                    if let Ok(content) = tokio::fs::read_to_string(path).await {
+                        if is_own_yaml_write(&content) {
+                            last_mtime = mtime;
+                            last_len = len;
                             continue;
                         }
+                        // BUG-16: Проверка эффективной необходимости вставок
+                        let has_active_device_assignments = device_routing.values().any(|dr| {
+                            dr.servers.first().is_some_and(|s| !s.trim().is_empty() && s.trim() != "default")
+                        }) || schedules.iter().any(|s| s.enabled)
+                           || (gaming_cfg.enabled && gaming_cfg.devices.iter().any(|d| d.enabled && d.server.as_ref().is_some_and(|s| !s.trim().is_empty())));
+                        let needs_device = has_active_device_assignments;
+                        let needs_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
 
-                        // Перезагрузка ядра Mihomo (RT-04) с откатом при сбое
-                        if let Err(e) = tx.apply_and_reload().await {
-                            log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
-                            reload_pending = true;
-                            last_mtime = None; // Сброс для обязательного повтора
-                        } else {
-                            let _ = tx.commit().await;
-                            log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
-                            reload_pending = false;
-                        }
-
-                        let cfg_snap = tx.config().clone();
-                        drop(tx);
-
-                        // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
-                        let _ = override_sync::sync_from_config(&cfg_snap, &[]).await;
-
-                        // RT-04: Обновляем зафиксированные метаданные только если reload успешен
-                        if !reload_pending {
-                            if let Ok(new_meta) = tokio::fs::metadata(path).await {
-                                last_mtime = new_meta.modified().ok();
-                                last_len = new_meta.len() as usize;
+                        let needs_force = force_domains.iter().any(|d| {
+                            let clean = crate::config::normalize_domain(d);
+                            if clean.is_empty() || !clean.contains('.') {
+                                return false;
                             }
+                            if direct_domains.iter().any(|dir| crate::config::normalize_domain(dir) == clean) {
+                                return false;
+                            }
+                            if zapret_cfg.enabled && routing::is_zapret_direct_domain(&clean, &zapret_cfg) {
+                                return false;
+                            }
+                            true
+                        });
+
+                        let needs_ignore = !ignore_servers.is_empty();
+                        let needs_flow = flow_server.as_ref().is_some_and(|s| !s.trim().is_empty());
+                        let needs_zapret = zapret_cfg.enabled
+                            && (zapret_cfg.hybrid_youtube
+                                || zapret_cfg.hybrid_discord
+                                || zapret_cfg.isolated_proxy
+                                || zapret_cfg.smart_tv_mode
+                                || zapret_cfg.bypass_github
+                                || zapret_cfg.bypass_torrents
+                                || zapret_cfg.bypass_adult
+                                || zapret_cfg.custom_entries.iter().any(|e| e.enabled));
+                        let needs_gaming = gaming_cfg.enabled;
+                        let needs_whitelist = whitelist_cfg.enabled;
+
+                        let missing_device = needs_device && !content.contains("AUTO-DEVICE");
+                        let missing_dev_domains = needs_dev_domains && !content.contains("AUTO-DEVICE-DOMAINS");
+                        let missing_force = needs_force && !content.contains("AUTO-FORCE");
+                        let missing_ignore = needs_ignore && !content.contains("exclude-filter:");
+                        let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
+                        let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
+                        let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
+                        let missing_gaming = needs_gaming && !content.contains("AUTO-GAMING");
+                        let missing_whitelist = needs_whitelist && !content.contains("AUTO-WHITELIST");
+
+                        restore = missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming || missing_whitelist;
+                    }
+                    (restore, (mtime, len))
+                };
+                last_mtime = meta_snapshot.0;
+                last_len = meta_snapshot.1;
+
+                if should_restore {
+                    log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
+
+                    // BUG-15 / ConfigTx: строгий порядок блокировок (routing_lock уже отпущен до ConfigTx::begin) и авто-откат при сбое reload Mihomo
+                    let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
+                        Ok(tx) => tx,
+                        Err(e) => {
+                            log_w!("[WATCHDOG] Ошибка захвата транзакции: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let raw_yaml = match tx.read_yaml().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log_w!("[WATCHDOG] Ошибка чтения config.yaml: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let (new_yaml, _applied) = match routing::apply_routing(&raw_yaml, tx.config()) {
+                        Ok(res) => res,
+                        Err(e) => {
+                            log_w!("[WATCHDOG] Ошибка роутинга: {}", e);
+                            continue;
+                        }
+                    };
+                    if let Err(e) = tx.set_yaml(new_yaml) {
+                        log_w!("[WATCHDOG] Ошибка валидации config.yaml: {}", e);
+                        continue;
+                    }
+
+                    // Перезагрузка ядра Mihomo (RT-04) с откатом при сбое
+                    if let Err(e) = tx.apply_and_reload().await {
+                        log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
+                        reload_pending = true;
+                        last_mtime = None; // Сброс для обязательного повтора
+                    } else {
+                        let _ = tx.commit().await;
+                        log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
+                        reload_pending = false;
+                    }
+
+                    let cfg_snap = tx.config().clone();
+                    drop(tx);
+
+                    // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
+                    let _ = override_sync::sync_from_config(&cfg_snap, &[]).await;
+
+                    // RT-04: Обновляем зафиксированные метаданные только если reload успешен
+                    if !reload_pending {
+                        if let Ok(new_meta) = tokio::fs::metadata(path).await {
+                            last_mtime = new_meta.modified().ok();
+                            last_len = new_meta.len() as usize;
                         }
                     }
                 }
@@ -565,6 +572,15 @@ pub fn rebuild_routing_after_dhcp_change(raw_yaml: &str, cfg: &config::AppConfig
     routing::apply_routing(raw_yaml, cfg).map(|(yaml, _)| yaml)
 }
 
+/// Проверяет, что строка является валидным маршрутизируемым LAN/WAN IPv4
+/// (исключает `0.0.0.0`, loopback, multicast и broadcast).
+pub fn is_valid_dhcp_ipv4(ip: &str) -> bool {
+    let Ok(addr) = ip.trim().parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    !addr.is_unspecified() && !addr.is_loopback() && !addr.is_multicast() && !addr.is_broadcast()
+}
+
 /// Фоновый монитор изменений DHCP IP-адресов устройств игрового режима по их постоянному MAC.
 /// Смена IP устройств по DHCP (баг 118): пары (старый IP → новый IP) для MAC, у которых IP изменился.
 pub fn detect_dhcp_ip_changes(
@@ -575,12 +591,13 @@ pub fn detect_dhcp_ip_changes(
     for (mac, ip) in current {
         let mac_l = mac.trim().to_lowercase();
         let ip = ip.trim();
-        if ip.is_empty() {
+        if !is_valid_dhcp_ipv4(ip) {
             continue;
         }
         if let Some(old) = prev_ip_by_mac.get(&mac_l) {
-            if old != ip && !old.is_empty() {
-                out.push((old.clone(), ip.to_string()));
+            let old_t = old.trim();
+            if is_valid_dhcp_ipv4(old_t) && old_t != ip {
+                out.push((old_t.to_string(), ip.to_string()));
             }
         }
     }
@@ -592,13 +609,18 @@ pub fn default_last_ip_by_mac_path(config_path: &Path) -> std::path::PathBuf {
     config_path.parent().unwrap_or_else(|| Path::new(".")).join("dhcp_last_ip_by_mac.json")
 }
 
-/// Загрузка сохранённой карты MAC -> IP при старте панели
+/// Загрузка сохранённой карты MAC -> IP при старте панели (с очисткой невалидных IP вроде 0.0.0.0)
 pub fn load_last_ip_by_mac(path: &Path) -> std::collections::HashMap<String, String> {
     if !path.exists() {
         return std::collections::HashMap::new();
     }
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Ok(bytes) => {
+            let mut map: std::collections::HashMap<String, String> =
+                serde_json::from_slice(&bytes).unwrap_or_default();
+            map.retain(|mac, ip| !mac.trim().is_empty() && is_valid_dhcp_ipv4(ip));
+            map
+        }
         Err(e) => {
             log_w!("[DHCP-WATCHDOG] Ошибка чтения {}: {e}", path.display());
             std::collections::HashMap::new()
@@ -629,7 +651,7 @@ pub fn migrate_ip_keyed_config(cfg: &mut config::AppConfig, changes: &[(String, 
     let valid_changes: Vec<(&str, &str)> = changes
         .iter()
         .map(|(o, n)| (o.trim(), n.trim()))
-        .filter(|(o, n)| !o.is_empty() && !n.is_empty() && o != n)
+        .filter(|(o, n)| is_valid_dhcp_ipv4(o) && is_valid_dhcp_ipv4(n) && o != n)
         .collect();
 
     if valid_changes.is_empty() {
@@ -754,7 +776,7 @@ pub(crate) fn sync_mac_keyed_device_ips(
         }
         if let Some(rci_dev) = current_devs.iter().find(|r| r.mac.trim().eq_ignore_ascii_case(mac)) {
             let new_ip = rci_dev.ip.trim();
-            if !new_ip.is_empty() && d.ip.trim() != new_ip {
+            if is_valid_dhcp_ipv4(new_ip) && d.ip.trim() != new_ip {
                 log_i!(
                     "[DHCP-WATCHDOG] 🔄 Whitelist: обновление IP для MAC {} ({} -> {})",
                     mac, d.ip, new_ip
@@ -771,7 +793,7 @@ pub(crate) fn sync_mac_keyed_device_ips(
         }
         if let Some(rci_dev) = current_devs.iter().find(|r| r.mac.trim().eq_ignore_ascii_case(mac)) {
             let new_ip = rci_dev.ip.trim();
-            if !new_ip.is_empty() && d.ip.trim() != new_ip {
+            if is_valid_dhcp_ipv4(new_ip) && d.ip.trim() != new_ip {
                 log_i!(
                     "[DHCP-WATCHDOG] 🔄 Gaming: обновление IP для MAC {} ({} -> {})",
                     mac, d.ip, new_ip
@@ -817,7 +839,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             for (mac, ip) in &current_pairs {
                 let mac_l = mac.trim().to_lowercase();
                 let ip_t = ip.trim();
-                if !ip_t.is_empty() && !mac_l.is_empty() {
+                if is_valid_dhcp_ipv4(ip_t) && !mac_l.is_empty() {
                     if last_ip_by_mac.get(&mac_l).map(|s| s.as_str()) != Some(ip_t) {
                         last_ip_by_mac.insert(mac_l, ip_t.to_string());
                         map_updated = true;
@@ -838,13 +860,53 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 continue;
             }
 
+            // Предварительная проверка на снимке, чтобы не захватывать ConfigTx вхолостую при отсутствии затронутых устройств
+            let arp_content = tokio::fs::read_to_string("/proc/net/arp").await.ok();
+            let probe_needs_tx = {
+                let mut probe = cfg.as_ref().clone();
+                let mut p_changed = migrate_ip_keyed_config(&mut probe, &ip_changes);
+                if !p_changed && has_mac_tracked {
+                    p_changed = current_devs.iter().any(|r| {
+                        let new_ip = r.ip.trim();
+                        is_valid_dhcp_ipv4(new_ip)
+                            && (cfg.whitelist.devices.iter().any(|d| d.mac.trim().eq_ignore_ascii_case(&r.mac) && d.ip.trim() != new_ip)
+                                || cfg.gaming.devices.iter().any(|d| d.mac.trim().eq_ignore_ascii_case(&r.mac) && d.ip.trim() != new_ip))
+                    });
+                }
+                if !p_changed && gaming_tracked {
+                    p_changed = cfg.gaming.devices.iter().any(|dev| {
+                        crate::config::is_gaming_device_active(dev, true)
+                            && current_devs.iter().any(|rci_dev| {
+                                rci_dev.mac.eq_ignore_ascii_case(&dev.mac)
+                                    && ((is_valid_dhcp_ipv4(&rci_dev.ip) && rci_dev.ip != dev.ip)
+                                        || rci_dev.ipv6.iter().any(|v6| {
+                                            let l = v6.trim().to_lowercase();
+                                            !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
+                                        }))
+                            })
+                    });
+                }
+                if !p_changed {
+                    if let Some(ref arp) = arp_content {
+                        p_changed = crate::routing::refresh_excluded_whitelist_last_ips(&mut probe, arp);
+                    }
+                }
+                p_changed
+            };
+            if !probe_needs_tx {
+                continue;
+            }
+
             // Баг 96: запись только через ConfigTx (config_lock → routing_lock, откат при сбое)
             let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await else {
                 continue;
             };
-            let mut changed = migrate_ip_keyed_config(tx.config_mut(), &ip_changes);
-            for (old, new) in &ip_changes {
-                log_i!("[DHCP-WATCHDOG] 🔄 Устройство сменило IP {old} → {new}: настройки устройства перенесены");
+            let migrated_ip = migrate_ip_keyed_config(tx.config_mut(), &ip_changes);
+            let mut changed = migrated_ip;
+            if migrated_ip {
+                for (old, new) in &ip_changes {
+                    log_i!("[DHCP-WATCHDOG] 🔄 Устройство сменило IP {old} → {new}: настройки устройства перенесены");
+                }
             }
             if sync_mac_keyed_device_ips(tx.config_mut(), &current_devs) {
                 changed = true;
@@ -857,7 +919,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                         continue;
                     }
                     if let Some(rci_dev) = current_devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
-                        let ip_diff = !rci_dev.ip.is_empty() && rci_dev.ip != dev.ip;
+                        let ip_diff = is_valid_dhcp_ipv4(&rci_dev.ip) && rci_dev.ip != dev.ip;
                         let filtered_v6: Vec<String> = rci_dev.ipv6.iter().filter(|v6| {
                             let l = v6.trim().to_lowercase();
                             !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
@@ -868,7 +930,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                                 "[DHCP-WATCHDOG] 🔄 Изменение IP адреса по DHCP для устройства '{}' (MAC {}): IPv4: {} -> {}, IPv6: {:?} -> {:?}. Автообновление маршрута...",
                                 dev.name, dev.mac, dev.ip, rci_dev.ip, dev.ipv6, filtered_v6
                             );
-                            if !rci_dev.ip.is_empty() {
+                            if is_valid_dhcp_ipv4(&rci_dev.ip) {
                                 dev.ip = rci_dev.ip.clone();
                             }
                             dev.ipv6 = filtered_v6;
@@ -880,8 +942,8 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             }
 
             // Обновляем кэш последних IP для MAC-исключений БС по актуальному ARP (баг 2)
-            if let Ok(arp) = tokio::fs::read_to_string("/proc/net/arp").await {
-                if crate::routing::refresh_excluded_whitelist_last_ips(tx.config_mut(), &arp) {
+            if let Some(ref arp) = arp_content {
+                if crate::routing::refresh_excluded_whitelist_last_ips(tx.config_mut(), arp) {
                     changed = true;
                 }
             }
@@ -3039,5 +3101,96 @@ mod structural_regression_tests {
         let eff = super::compute_effective_group_targets(&[mon_night, block_sched], &groups, "01:00", 2);
         let gname = crate::routing::group_name_for("192.168.1.50", "");
         assert_eq!(eff.get(&gname).map(|(_, t)| t.as_str()), Some("REJECT"));
+    }
+
+    #[test]
+    fn regression_watchdog_yaml_restore_does_not_deadlock_config_tx() {
+        let src = include_str!("watchdog.rs");
+        let spawn_start = src.find("pub fn spawn(state: AppState)").expect("spawn fn");
+        let spawn_end = src[spawn_start..]
+            .find("pub fn is_time_in_range")
+            .map(|o| spawn_start + o)
+            .unwrap_or(src.len());
+        let spawn_body = &src[spawn_start..spawn_end];
+        let try_pos = spawn_body
+            .find("state.routing_lock.try_lock()")
+            .expect("try_lock in spawn");
+        let tx_pos = spawn_body
+            .find("ConfigTx::begin(&state)")
+            .expect("ConfigTx::begin in spawn");
+        let before_tx = &spawn_body[..tx_pos];
+        let between = &spawn_body[try_pos..tx_pos];
+        assert!(
+            before_tx.contains("let (should_restore, meta_snapshot) = {") && between.contains("};"),
+            "routing_lock guard must be dropped before ConfigTx::begin to prevent self-deadlock"
+        );
+    }
+
+    #[test]
+    fn regression_dhcp_watchdog_ignores_zero_ip_and_skips_noop_tx() {
+        assert!(!super::is_valid_dhcp_ipv4("0.0.0.0"));
+        assert!(!super::is_valid_dhcp_ipv4("127.0.0.1"));
+        assert!(!super::is_valid_dhcp_ipv4("255.255.255.255"));
+        assert!(!super::is_valid_dhcp_ipv4("224.0.0.1"));
+        assert!(!super::is_valid_dhcp_ipv4(""));
+        assert!(super::is_valid_dhcp_ipv4("192.168.1.134"));
+
+        let tmp = std::env::temp_dir().join(format!("dhcp_map_test_{}.json", std::process::id()));
+        std::fs::write(
+            &tmp,
+            r#"{"66:4a:01:f0:1c:73":"0.0.0.0","e8:6a:64:d5:9a:b2":"192.168.1.115"}"#,
+        )
+        .unwrap();
+        let loaded = super::load_last_ip_by_mac(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(!loaded.contains_key("66:4a:01:f0:1c:73"));
+        assert_eq!(loaded.get("e8:6a:64:d5:9a:b2").map(String::as_str), Some("192.168.1.115"));
+
+        let mut prev = std::collections::HashMap::new();
+        prev.insert("66:4a:01:f0:1c:73".to_string(), "0.0.0.0".to_string());
+        prev.insert("aa:bb:cc:dd:ee:01".to_string(), "192.168.1.134".to_string());
+        let current = vec![
+            ("66:4a:01:f0:1c:73".to_string(), "192.168.1.134".to_string()),
+            ("aa:bb:cc:dd:ee:01".to_string(), "0.0.0.0".to_string()),
+        ];
+        assert!(super::detect_dhcp_ip_changes(&prev, &current).is_empty());
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.device_routing.insert(
+            "192.168.1.134".into(),
+            crate::config::DeviceRouting {
+                servers: vec!["NodeA".into()],
+                ..Default::default()
+            },
+        );
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "aa:bb:cc:dd:ee:01".into(),
+            ip: "192.168.1.134".into(),
+            name: Some("Phone".into()),
+            enabled: true,
+            server: None,
+        });
+        assert!(!super::migrate_ip_keyed_config(
+            &mut cfg,
+            &[("192.168.1.134".into(), "0.0.0.0".into())]
+        ));
+        assert!(cfg.device_routing.contains_key("192.168.1.134"));
+
+        let rci_devs = vec![crate::rci::Device {
+            mac: "aa:bb:cc:dd:ee:01".into(),
+            name: "Phone".into(),
+            ip: "0.0.0.0".into(),
+            policy: String::new(),
+            policy_name: String::new(),
+            online: false,
+            interface: String::new(),
+            is_current_device: false,
+            rxbytes: 0,
+            txbytes: 0,
+            speed_limit_kbps: 0,
+            ipv6: vec![],
+        }];
+        assert!(!super::sync_mac_keyed_device_ips(&mut cfg, &rci_devs));
+        assert_eq!(cfg.whitelist.devices[0].ip, "192.168.1.134");
     }
 }

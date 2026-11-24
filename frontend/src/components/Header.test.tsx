@@ -213,7 +213,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
           update_available: true,
         })
       }
-      if (path === 'mihomo/releases') {
+      if (path.startsWith('mihomo/releases')) {
         return Promise.resolve({
           current_version: 'v1.19.0',
           latest_version: 'v1.19.1',

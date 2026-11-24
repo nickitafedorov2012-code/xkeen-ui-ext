@@ -198,7 +198,7 @@ export default function Header({
     const checkMihomoUpdate = async () => {
       if (document.hidden) return
       try {
-        const res = await apiGet<{ current_version: string; latest_version: string }>('mihomo/releases')
+        const res = await apiGet<{ current_version: string; latest_version: string }>('mihomo/releases?light=1')
         if (active && res) {
           const cur = res.current_version || ''
           const lat = res.latest_version || ''
@@ -212,7 +212,7 @@ export default function Header({
     }
 
     checkMihomoUpdate()
-    const timer = setInterval(checkMihomoUpdate, 90_000)
+    const timer = setInterval(checkMihomoUpdate, 900_000)
     return () => {
       active = false
       clearInterval(timer)

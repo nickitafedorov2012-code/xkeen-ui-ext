@@ -563,13 +563,7 @@ async fn main() {
             if stop.is_cancelled() {
                 break;
             }
-            let cfg = ping_auto_state.config.read().await.clone();
-            crate::mihomo::restore_active_selectors_after_reload(
-                &ping_auto_state.http,
-                &cfg,
-                crate::mihomo::last_selected_tunnel_server().as_deref(),
-            )
-            .await;
+            let cfg = ping_auto_state.cfg_snapshot().await;
             let _ = crate::mihomo::run_auto_ping_tick(&ping_auto_state.http, &cfg).await;
             tokio::select! {
                 _ = stop.cancelled() => break,
@@ -669,41 +663,56 @@ async fn main() {
             }
         }
         if mihomo_answered {
-            if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&wl_sync_state).await {
-                if let Ok(current_yaml) = tx.read_yaml().await {
-                    let cfg_snapshot = wl_sync_state.config.read().await.clone();
-                    match reconcile_startup_yaml(&current_yaml, &cfg_snapshot) {
-                        Ok(Some(new_yaml)) => {
-                            if let Err(e) = tx.set_yaml(new_yaml) {
-                                log_w!("[STARTUP] Отклонена синхронизация config.yaml: {}", e);
-                            } else if let Err(e) = tx.commit_and_reload().await {
-                                log_w!("[STARTUP] Не удалось применить обновлённый config.yaml: {}", e);
-                            } else {
-                                log_i!("[STARTUP] ✓ config.yaml синхронизирован с актуальной версией правил панели");
-                                let closed = mihomo::close_server_connections(
-                                    &wl_sync_state.http,
-                                    &cfg_snapshot,
-                                    crate::routing::WHITELIST_GROUP_NAME,
-                                )
-                                .await;
-                                if closed > 0 {
-                                    log_i!(
-                                        "[STARTUP] Закрыто {} устаревших соединений группы {}",
-                                        closed,
-                                        crate::routing::WHITELIST_GROUP_NAME
-                                    );
+            let mut reloaded_and_closed = false;
+            {
+                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&wl_sync_state).await {
+                    if let Ok(current_yaml) = tx.read_yaml().await {
+                        let cfg_snapshot = tx.config().clone();
+                        match reconcile_startup_yaml(&current_yaml, &cfg_snapshot) {
+                            Ok(Some(new_yaml)) => {
+                                if let Err(e) = tx.set_yaml(new_yaml) {
+                                    log_w!("[STARTUP] Отклонена синхронизация config.yaml: {}", e);
+                                } else if let Err(e) = tx.commit_and_reload().await {
+                                    log_w!("[STARTUP] Не удалось применить обновлённый config.yaml: {}", e);
+                                } else {
+                                    log_i!("[STARTUP] ✓ config.yaml синхронизирован с актуальной версией правил панели");
+                                    reloaded_and_closed = true;
                                 }
                             }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            log_w!("[STARTUP] Ошибка проверки актуальности config.yaml: {}", e);
+                            Ok(None) => {}
+                            Err(e) => {
+                                log_w!("[STARTUP] Ошибка проверки актуальности config.yaml: {}", e);
+                            }
                         }
                     }
                 }
             }
-            let cfg_after = wl_sync_state.config.read().await.clone();
-            mihomo::restore_active_selectors_after_reload(&wl_sync_state.http, &cfg_after, None).await;
+            if reloaded_and_closed {
+                let cfg_snap = wl_sync_state.cfg_snapshot().await;
+                let closed = mihomo::close_server_connections(
+                    &wl_sync_state.http,
+                    &cfg_snap,
+                    crate::routing::WHITELIST_GROUP_NAME,
+                )
+                .await;
+                if closed > 0 {
+                    log_i!(
+                        "[STARTUP] Закрыто {} устаревших соединений группы {}",
+                        closed,
+                        crate::routing::WHITELIST_GROUP_NAME
+                    );
+                }
+            }
+            let cfg_after = wl_sync_state.cfg_snapshot().await;
+            let current_primary_now = mihomo::get_proxies(&wl_sync_state.http, &cfg_after)
+                .await
+                .ok()
+                .and_then(|p| {
+                    ["PROXY", "GLOBAL", "Proxy"]
+                        .iter()
+                        .find_map(|g| p.get(*g).and_then(|v| v.get("now")).and_then(|n| n.as_str()).map(str::to_string))
+                });
+            mihomo::restore_active_selectors_after_reload(&wl_sync_state.http, &cfg_after, current_primary_now.as_deref()).await;
             active_srv = match mihomo::get_active_server(&wl_sync_state.http, &cfg_after).await {
                 Ok(s) => s,
                 Err(_) => active_srv,

@@ -359,7 +359,21 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
         } else {
             crate::free_sub::FreeSubMode::Vpn
         };
-        if !crate::free_sub::is_mode_active(state, mode).await {
+        let mode_active = crate::free_sub::is_mode_active(state, mode).await;
+        let wl_needs_repair = if mode == crate::free_sub::FreeSubMode::Whitelist {
+            let cfg_snap = state.cfg_snapshot().await;
+            if !cfg_snap.whitelist.enabled {
+                true
+            } else {
+                let yaml = tokio::fs::read_to_string(&cfg_snap.mihomo.config_path)
+                    .await
+                    .unwrap_or_default();
+                !crate::free_sub::yaml_has_whitelist_routing(&yaml)
+            }
+        } else {
+            false
+        };
+        if !mode_active || wl_needs_repair {
             if let Ok(node) = crate::free_sub::connect_pool_node(state, mode).await {
                 return Ok(format!("Подключён узел {node}"));
             }

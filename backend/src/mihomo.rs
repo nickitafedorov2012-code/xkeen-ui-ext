@@ -408,6 +408,12 @@ pub fn record_selected_tunnel_server(server: &str) {
     }
 }
 
+/// Очищает последний выбранный узел туннеля (например, при ручном отключении в DIRECT).
+pub fn clear_selected_tunnel_server() {
+    let mut guard = LAST_SELECTED_TUNNEL_SERVER.write().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
 /// Инвалидация кэша прокси и провайдеров: вызывается при переключении узлов, групп или reload конфига.
 pub fn invalidate_proxies_cache() {
     let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
@@ -421,6 +427,20 @@ pub fn get_cached_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
     let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref entry) = *guard {
         if entry.cached_at.elapsed() < std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS) {
+            return Some(entry.data.clone());
+        }
+    }
+    None
+}
+
+fn get_cached_proxies_if_fresh_for(host: &str, port: u16) -> Option<BTreeMap<String, Value>> {
+    let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let ep_ok = entry
+            .endpoint
+            .as_ref()
+            .map_or(true, |(h, p)| h == host && *p == port);
+        if ep_ok && entry.cached_at.elapsed() < std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS) {
             return Some(entry.data.clone());
         }
     }
@@ -453,6 +473,21 @@ pub fn get_cached_proxies_if_recent() -> Option<(BTreeMap<String, Value>, std::t
     None
 }
 
+fn get_cached_proxies_if_recent_for(host: &str, port: u16) -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
+    let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let ep_ok = entry
+            .endpoint
+            .as_ref()
+            .map_or(true, |(h, p)| h == host && *p == port);
+        let age = entry.cached_at.elapsed();
+        if ep_ok && age < std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS) {
+            return Some((entry.data.clone(), age));
+        }
+    }
+    None
+}
+
 pub fn get_cached_provider_proxies_if_recent() -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
     let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref entry) = *guard {
@@ -464,11 +499,26 @@ pub fn get_cached_provider_proxies_if_recent() -> Option<(BTreeMap<String, Value
     None
 }
 
+fn get_cached_provider_proxies_if_recent_for(host: &str, port: u16) -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
+    let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let ep_ok = entry
+            .endpoint
+            .as_ref()
+            .map_or(true, |(h, p)| h == host && *p == port);
+        let age = entry.cached_at.elapsed();
+        if ep_ok && age < std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS) {
+            return Some((entry.data.clone(), age));
+        }
+    }
+    None
+}
+
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
 /// Оптимизировано 3-секундным TTL-кэшем с защитой от сбоев (stale-if-error).
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
     // 1. Быстрый возврат из кэша (zero network I/O, zero JSON parsing)
-    if let Some(cached) = get_cached_proxies_if_fresh() {
+    if let Some(cached) = get_cached_proxies_if_fresh_for(&cfg.mihomo.host, cfg.mihomo.port) {
         return Ok(cached);
     }
 
@@ -478,7 +528,7 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
         Err(err) => {
             // Resilient Fallback: если ядро временно перезагружается или занято,
             // возвращаем недавний кэш (до 30 с), предотвращая ложный сбой failover
-            if let Some((stale_data, age)) = get_cached_proxies_if_recent() {
+            if let Some((stale_data, age)) = get_cached_proxies_if_recent_for(&cfg.mihomo.host, cfg.mihomo.port) {
                 crate::log_w!(
                     "Mihomo /proxies временно недоступен ({}), отдаём кэш возрастом {:.1} с",
                     err,
@@ -508,7 +558,7 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
         let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(ProxiesCacheEntry {
             cached_at: std::time::Instant::now(),
-            endpoint: None,
+            endpoint: Some((cfg.mihomo.host.clone(), cfg.mihomo.port)),
             data: out.clone(),
         });
     }
@@ -531,7 +581,7 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
     let v = match m_get(http, cfg, "/providers/proxies").await {
         Ok(val) => val,
         Err(err) => {
-            if let Some((stale_data, age)) = get_cached_provider_proxies_if_recent() {
+            if let Some((stale_data, age)) = get_cached_provider_proxies_if_recent_for(&cfg.mihomo.host, cfg.mihomo.port) {
                 crate::log_w!(
                     "Mihomo /providers/proxies временно недоступен ({}), отдаём кэш возрастом {:.1} с",
                     err,
@@ -1035,11 +1085,12 @@ pub async fn probe_service_provider_node_l7_stable(
 }
 
 /// Добавляет оценку доступности Telegram к базовому L7-скору.
-/// Если Telegram отвечает — добавляет 1/3 задержки для приоритета быстрых узлов;
-/// если Telegram не отвечает/таймаутит — добавляет жёсткий штраф +4000 мс,
-/// чтобы узлы с отрезанным Telegram никогда не побеждали узлы с живым Telegram.
+/// Если Telegram отвечает быстро (<= 2000 мс) — добавляет 1/3 задержки;
+/// если Telegram тормозит (> 2000 мс) — добавляет прогрессивный штраф `tg / 2 + (tg - 2000)`;
+/// если Telegram не отвечает/таймаутит — добавляет жёсткий штраф +4000 мс.
 pub fn compute_l7_scored_with_telegram(base_score: i64, telegram_delay: Option<i64>) -> i64 {
     match telegram_delay {
+        Some(tg) if tg > 2000 => base_score + tg / 2 + (tg - 2000),
         Some(tg) if tg > 0 => base_score + tg / 3,
         _ => base_score + 4000,
     }
@@ -1981,7 +2032,7 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             skipped += 1;
             continue;
         }
-        match m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await {
+        match m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 5).await {
             Ok(_) => switched += 1,
             Err(e) => last_err = e,
         }
@@ -2004,7 +2055,11 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
     }
     if switched > 0 {
         invalidate_proxies_cache();
-        record_selected_tunnel_server(&target);
+        if target.eq_ignore_ascii_case("DIRECT") {
+            clear_selected_tunnel_server();
+        } else {
+            record_selected_tunnel_server(&target);
+        }
         if wl_has_target && !wl_switched && prev_wl_now != target {
             match switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &target).await {
                 Ok(_) => wl_switched = true,
@@ -3195,6 +3250,21 @@ pub async fn restore_active_selectors_after_reload(
         .and_then(|v| v.get("now"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if pre_reload_proxy_now.is_some_and(|p| p.trim().eq_ignore_ascii_case("DIRECT")) {
+        let direct_in_primary = primary_all.is_empty()
+            || primary_all.iter().any(|x| x.eq_ignore_ascii_case("DIRECT"));
+        if direct_in_primary && !primary_now.eq_ignore_ascii_case("DIRECT") {
+            if let Err(e) = switch_selector(http, cfg, &primary_group, "DIRECT").await {
+                crate::log_w!(
+                    "[MIHOMO] Не удалось сохранить DIRECT для '{}' после reload: {}",
+                    primary_group,
+                    e
+                );
+            }
+        }
+        return;
+    }
 
     let candidate = desired_tunnel_server_for_cfg(cfg, pre_reload_proxy_now);
     let desired_for_primary = match candidate {

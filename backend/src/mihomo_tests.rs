@@ -2013,3 +2013,96 @@ pub fn reset_manual_ping_state_for_test() {
     MANUAL_PING_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
     *LAST_MANUAL_PING_AT.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
+
+
+#[tokio::test]
+async fn regression_disconnect_direct_clears_last_selected_tunnel_server_and_blocks_resurrection() {
+    use axum::{extract::Request, http::StatusCode, response::IntoResponse, Json, Router};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    let _cache_guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_proxies_cache_for_test();
+    clear_selected_tunnel_server();
+
+    let proxy_now = Arc::new(Mutex::new("🇷🇺 VK — #2".to_string()));
+    let proxy_now_srv = proxy_now.clone();
+
+    let app = Router::new().fallback(move |req: Request| {
+        let proxy_now_srv = proxy_now_srv.clone();
+        async move {
+            let method = req.method().clone();
+            let path = req.uri().path().to_string();
+            let body_bytes = axum::body::to_bytes(req.into_body(), 4096)
+                .await
+                .unwrap_or_default();
+            let body_name = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                .ok()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+
+            match (method, path.as_str()) {
+                (axum::http::Method::GET, "/proxies") => {
+                    let cur = proxy_now_srv.lock().unwrap().clone();
+                    Json(json!({
+                        "proxies": {
+                            "PROXY": { "type": "Selector", "now": cur, "all": ["DIRECT", "🇷🇺 VK — #2"] },
+                            "🇷🇺 VK — #2": { "type": "Vless" },
+                        }
+                    }))
+                    .into_response()
+                }
+                (axum::http::Method::PUT, "/proxies/PROXY") => {
+                    if let Some(nm) = body_name {
+                        *proxy_now_srv.lock().unwrap() = nm;
+                    }
+                    StatusCode::NO_CONTENT.into_response()
+                }
+                (axum::http::Method::PUT, "/configs") => {
+                    // Симулируем сброс селектора Mihomo после reload_config на первый/чужой узел
+                    *proxy_now_srv.lock().unwrap() = "🇷🇺 VK — #2".to_string();
+                    StatusCode::NO_CONTENT.into_response()
+                }
+                _ => StatusCode::NO_CONTENT.into_response(),
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut cfg = AppConfig::default();
+    cfg.mihomo.host = "127.0.0.1".into();
+    cfg.mihomo.port = port;
+    cfg.failover.priority_server = "🇷🇺 VK — #2".into();
+    cfg.failover.priority_chain = vec!["🇷🇺 VK — #2".into()];
+    cfg.failover.bs_priority_chain = vec!["🇷🇺 VK — #2".into()];
+    let client = reqwest::Client::new();
+
+    // 1. Переключение на сервер фиксирует LAST_SELECTED_TUNNEL_SERVER
+    switch_server(&client, &cfg, "🇷🇺 VK — #2").await.unwrap();
+    assert_eq!(last_selected_tunnel_server().as_deref(), Some("🇷🇺 VK — #2"));
+
+    // 2. Переключение на DIRECT обязано очистить LAST_SELECTED_TUNNEL_SERVER
+    switch_server(&client, &cfg, "DIRECT").await.unwrap();
+    assert_eq!(last_selected_tunnel_server(), None);
+    assert_eq!(*proxy_now.lock().unwrap(), "DIRECT");
+
+    // 3. reload_config при активном DIRECT не воскрешает прежний узел, а удерживает DIRECT
+    reload_config(&client, &cfg).await.unwrap();
+    assert_eq!(*proxy_now.lock().unwrap(), "DIRECT");
+
+    // 4. В 30-секундном цикле PING-AUTO в main.rs не должно быть restore_active_selectors_after_reload
+    let main_src = include_str!("main.rs");
+    let ping_start = main_src.find("// PING-AUTO:").expect("PING-AUTO block must exist");
+    let ping_end = ping_start + main_src[ping_start..].find("spawn_flow_auto_select_loop").expect("end of PING-AUTO");
+    assert!(
+        !main_src[ping_start..ping_end].contains("restore_active_selectors_after_reload"),
+        "PING-AUTO loop must not call restore_active_selectors_after_reload"
+    );
+
+    clear_selected_tunnel_server();
+    srv.abort();
+}

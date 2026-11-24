@@ -1413,7 +1413,15 @@ impl AppConfig {
     }
 
     pub fn mihomo_proxy_url(&self) -> String {
-        format!("http://{}:{}", self.mihomo.host, self.mihomo.mixed_port)
+        let port = if !self.mihomo.config_path.trim().is_empty()
+            && std::path::Path::new(&self.mihomo.config_path).exists()
+        {
+            crate::routing::mihomo_mixed_port_from_path(&self.mihomo.config_path)
+        } else {
+            self.mihomo.mixed_port
+        };
+        let effective = if port > 0 { port } else { self.mihomo.mixed_port };
+        format!("http://{}:{}", self.mihomo.host, effective)
     }
 
     pub fn health_check_url(&self) -> &str {

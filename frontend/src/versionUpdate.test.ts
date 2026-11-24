@@ -71,9 +71,16 @@ describe('bug 140: update check & version comparison', () => {
     expect(hook1Result?.updateInfo?.latest).toBe('1.16.5')
     expect(hook2Result?.updateInfo?.latest).toBe('1.16.5')
 
-    // Advance 60s
+    // Advance 60s — still 1 call (poll interval is 15m)
     await act(async () => {
       vi.advanceTimersByTime(60_000)
+      await Promise.resolve()
+    })
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // Advance remaining 840s (total 900s = 15m)
+    await act(async () => {
+      vi.advanceTimersByTime(840_000)
       await Promise.resolve()
     })
 

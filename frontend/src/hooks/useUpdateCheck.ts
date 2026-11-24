@@ -117,7 +117,7 @@ async function switchUpdateChannel(channel: UpdateChannel): Promise<void> {
 function startPollingIfNeeded() {
   if (!pollTimer && typeof window !== 'undefined') {
     fetchUpdateCheck()
-    pollTimer = setInterval(fetchUpdateCheck, 60_000)
+    pollTimer = setInterval(fetchUpdateCheck, 900_000)
   }
 }
 

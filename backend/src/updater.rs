@@ -220,7 +220,16 @@ static LAST_CHECK_STABLE: tokio::sync::Mutex<Option<(std::time::Instant, GhRelea
     tokio::sync::Mutex::const_new(None);
 static LAST_CHECK_BETA: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
     tokio::sync::Mutex::const_new(None);
+static LAST_CHECK_STABLE_ERR: tokio::sync::Mutex<Option<(std::time::Instant, String)>> =
+    tokio::sync::Mutex::const_new(None);
+static LAST_CHECK_BETA_ERR: tokio::sync::Mutex<Option<(std::time::Instant, String)>> =
+    tokio::sync::Mutex::const_new(None);
+static CHECK_STABLE_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CHECK_BETA_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const UPDATE_CHECK_TTL_SECS: u64 = 600;
+const UPDATE_CHECK_NEG_TTL_SECS: u64 = 120;
 
 #[derive(Deserialize)]
 struct JsDelivrResolved {
@@ -656,7 +665,7 @@ async fn fetch_latest(
                 if res.status().is_success() {
                     if let Ok(list) = res.json::<Vec<GhRelease>>().await {
                         if let Some(mut rel) = select_best_release(list, true) {
-                            if rel.body.trim().is_empty() {
+                            if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
                                 rel.body = fetch_notes(http, &rel.tag_name).await;
                             }
                             return Ok(rel);
@@ -678,7 +687,11 @@ async fn fetch_latest(
                             .into_iter()
                             .max_by(|a, b| version_tuple(a).cmp(&version_tuple(b)))
                         {
-                            let notes = fetch_notes(http, &tag).await;
+                            let notes = if is_newer(&tag, VERSION) {
+                                fetch_notes(http, &tag).await
+                            } else {
+                                String::new()
+                            };
                             return Ok(GhRelease {
                                 tag_name: tag,
                                 body: notes,
@@ -703,7 +716,11 @@ async fn fetch_latest(
             if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
                 let tag = tag.trim_matches('/').to_string();
                 if !tag.is_empty() {
-                    let notes = fetch_notes(http, &tag).await;
+                    let notes = if is_newer(&tag, VERSION) {
+                        fetch_notes(http, &tag).await
+                    } else {
+                        String::new()
+                    };
                     return Ok(GhRelease {
                         tag_name: tag,
                         body: notes,
@@ -723,7 +740,11 @@ async fn fetch_latest(
             if res.status().is_success() {
                 if let Ok(r) = res.json::<JsDelivrResolved>().await {
                     let tag = format!("v{}", r.version.trim_start_matches('v'));
-                    let notes = fetch_notes(http, &tag).await;
+                    let notes = if is_newer(&tag, VERSION) {
+                        fetch_notes(http, &tag).await
+                    } else {
+                        String::new()
+                    };
                     return Ok(GhRelease {
                         tag_name: tag,
                         body: notes,
@@ -751,7 +772,7 @@ async fn fetch_latest(
             if res.status().is_success() {
                 if let Ok(list) = res.json::<Vec<GhRelease>>().await {
                     if let Some(mut rel) = select_best_release(list, false) {
-                        if rel.body.trim().is_empty() {
+                        if rel.body.trim().is_empty() && is_newer(&rel.tag_name, VERSION) {
                             rel.body = fetch_notes(http, &rel.tag_name).await;
                         }
                         return Ok(rel);
@@ -769,7 +790,7 @@ async fn fetch_latest(
     }
 }
 
-/// Кэшированное получение последнего релиза (раздельный кэш для stable и beta).
+/// Кэшированное получение последнего релиза (раздельный кэш для stable и beta, singleflight и negative cache).
 /// Возвращает `(release, stale_warning)`.
 async fn get_latest_cached(
     http: &reqwest::Client,
@@ -782,11 +803,18 @@ async fn get_latest_cached(
     } else {
         &LAST_CHECK_STABLE
     };
-    let ttl = if include_beta {
-        Duration::from_secs(300)
+    let err_mutex = if include_beta {
+        &LAST_CHECK_BETA_ERR
     } else {
-        Duration::from_secs(30)
+        &LAST_CHECK_STABLE_ERR
     };
+    let fetch_lock = if include_beta {
+        &CHECK_BETA_FETCH_LOCK
+    } else {
+        &CHECK_STABLE_FETCH_LOCK
+    };
+    let ttl = Duration::from_secs(UPDATE_CHECK_TTL_SECS);
+    let neg_ttl = Duration::from_secs(UPDATE_CHECK_NEG_TTL_SECS);
 
     if !force {
         let guard = cache_mutex.lock().await;
@@ -795,15 +823,49 @@ async fn get_latest_cached(
                 return Ok((rel.clone(), None));
             }
         }
+        drop(guard);
+        let eguard = err_mutex.lock().await;
+        if let Some((time, ref err_msg)) = *eguard {
+            if time.elapsed() < neg_ttl {
+                let guard = cache_mutex.lock().await;
+                if let Some((_, ref rel)) = *guard {
+                    return Ok((rel.clone(), Some(format!("Показаны кэшированные данные: {err_msg}"))));
+                }
+                return Err(err_msg.clone());
+            }
+        }
+    }
+
+    let _sf = fetch_lock.lock().await;
+    if !force {
+        let guard = cache_mutex.lock().await;
+        if let Some((time, ref rel)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok((rel.clone(), None));
+            }
+        }
+        drop(guard);
+        let eguard = err_mutex.lock().await;
+        if let Some((time, ref err_msg)) = *eguard {
+            if time.elapsed() < neg_ttl {
+                let guard = cache_mutex.lock().await;
+                if let Some((_, ref rel)) = *guard {
+                    return Ok((rel.clone(), Some(format!("Показаны кэшированные данные: {err_msg}"))));
+                }
+                return Err(err_msg.clone());
+            }
+        }
     }
 
     match fetch_latest(http, proxy_url, include_beta).await {
         Ok(fresh) => {
+            *err_mutex.lock().await = None;
             let mut guard = cache_mutex.lock().await;
             *guard = Some((std::time::Instant::now(), fresh.clone()));
             Ok((fresh, None))
         }
         Err(e) => {
+            *err_mutex.lock().await = Some((std::time::Instant::now(), e.clone()));
             // При ошибке (например 403 Rate Limit) возвращаем последний закэшированный релиз с пометкой
             let guard = cache_mutex.lock().await;
             if let Some((_, ref rel)) = *guard {
@@ -1498,7 +1560,10 @@ pub async fn install(
 
 // ==================== УПРАВЛЕНИЕ И ОБНОВЛЕНИЕ ЯДРА MIHOMO ====================
 
-const MIHOMO_REPO_RELEASES: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=15";
+const MIHOMO_REPO_RELEASES: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=8";
+const MIHOMO_LATEST_REDIRECT: &str = "https://github.com/MetaCubeX/mihomo/releases/latest";
+const MIHOMO_RELEASES_TTL_SECS: u64 = 900;
+const MIHOMO_RELEASES_NEG_TTL_SECS: u64 = 180;
 
 #[derive(Deserialize, serde::Serialize, Clone, Debug)]
 pub struct MihomoReleaseAsset {
@@ -1525,31 +1590,52 @@ pub struct MihomoRelease {
 
 static MIHOMO_RELEASES_CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Vec<MihomoRelease>)>> =
     tokio::sync::Mutex::const_new(None);
+static MIHOMO_RELEASES_ERR: tokio::sync::Mutex<Option<(std::time::Instant, String)>> =
+    tokio::sync::Mutex::const_new(None);
+static MIHOMO_RELEASES_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+static MIHOMO_LIGHT_CACHE: tokio::sync::Mutex<Option<(std::time::Instant, String)>> =
+    tokio::sync::Mutex::const_new(None);
+static MIHOMO_LIGHT_ERR: tokio::sync::Mutex<Option<(std::time::Instant, String)>> =
+    tokio::sync::Mutex::const_new(None);
+static MIHOMO_LIGHT_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+static MIHOMO_ARCH_CACHE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+#[cfg(unix)]
+static MIHOMO_VER_CLI_CACHE: tokio::sync::Mutex<Option<(std::time::Instant, String, String)>> =
+    tokio::sync::Mutex::const_new(None);
 
 pub async fn detect_mihomo_arch() -> &'static str {
+    if let Some(&cached) = MIHOMO_ARCH_CACHE.get() {
+        return cached;
+    }
     #[cfg(unix)]
     {
         if let Ok(out) = tokio::process::Command::new("uname").arg("-m").output().await {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
-            if s.contains("aarch64") || s.contains("arm64") {
-                return "arm64";
-            }
-            if s.contains("mips") {
+            let detected = if s.contains("aarch64") || s.contains("arm64") {
+                Some("arm64")
+            } else if s.contains("mips") {
                 if s.contains("el") || s.contains("le") || cfg!(target_endian = "little") {
-                    return "mipsle-softfloat";
+                    Some("mipsle-softfloat")
+                } else {
+                    Some("mips-hardfloat")
                 }
-                return "mips-hardfloat";
-            }
-            if s.contains("x86_64") || s.contains("amd64") {
-                return "amd64";
-            }
-            if s.contains("armv7") || s.contains("armv6") || s.contains("arm") {
-                return "armv7";
+            } else if s.contains("x86_64") || s.contains("amd64") {
+                Some("amd64")
+            } else if s.contains("armv7") || s.contains("armv6") || s.contains("arm") {
+                Some("armv7")
+            } else {
+                None
+            };
+            if let Some(a) = detected {
+                let _ = MIHOMO_ARCH_CACHE.set(a);
+                return a;
             }
         }
     }
 
-    if cfg!(target_arch = "aarch64") {
+    let fallback = if cfg!(target_arch = "aarch64") {
         "arm64"
     } else if cfg!(target_arch = "mips") {
         if cfg!(target_endian = "little") {
@@ -1563,7 +1649,9 @@ pub async fn detect_mihomo_arch() -> &'static str {
         "amd64"
     } else {
         "arm64"
-    }
+    };
+    let _ = MIHOMO_ARCH_CACHE.set(fallback);
+    fallback
 }
 
 pub fn find_mihomo_asset<'a>(assets: &'a [MihomoReleaseAsset], arch: &str) -> Option<&'a MihomoReleaseAsset> {
@@ -1611,7 +1699,7 @@ async fn fetch_mihomo_releases(direct: &reqwest::Client, proxy_url: &str) -> Res
             .get(MIHOMO_REPO_RELEASES)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
             .send()
             .await
         {
@@ -1628,39 +1716,199 @@ async fn fetch_mihomo_releases(direct: &reqwest::Client, proxy_url: &str) -> Res
 }
 
 async fn fetch_mihomo_releases_cached(direct: &reqwest::Client, proxy_url: &str) -> Result<Vec<MihomoRelease>, String> {
-    let mut guard = MIHOMO_RELEASES_CACHE.lock().await;
-    if let Some((time, ref list)) = *guard {
-        if time.elapsed() < Duration::from_secs(45) {
-            return Ok(list.clone());
+    let ttl = Duration::from_secs(MIHOMO_RELEASES_TTL_SECS);
+    let neg_ttl = Duration::from_secs(MIHOMO_RELEASES_NEG_TTL_SECS);
+
+    {
+        let guard = MIHOMO_RELEASES_CACHE.lock().await;
+        if let Some((time, ref list)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok(list.clone());
+            }
         }
     }
-    let fresh = fetch_mihomo_releases(direct, proxy_url).await?;
-    *guard = Some((std::time::Instant::now(), fresh.clone()));
-    Ok(fresh)
+    {
+        let eguard = MIHOMO_RELEASES_ERR.lock().await;
+        if let Some((time, ref err_msg)) = *eguard {
+            if time.elapsed() < neg_ttl {
+                let guard = MIHOMO_RELEASES_CACHE.lock().await;
+                if let Some((_, ref list)) = *guard {
+                    return Ok(list.clone());
+                }
+                return Err(err_msg.clone());
+            }
+        }
+    }
+
+    let _sf = MIHOMO_RELEASES_FETCH_LOCK.lock().await;
+    {
+        let guard = MIHOMO_RELEASES_CACHE.lock().await;
+        if let Some((time, ref list)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok(list.clone());
+            }
+        }
+    }
+
+    match fetch_mihomo_releases(direct, proxy_url).await {
+        Ok(fresh) => {
+            *MIHOMO_RELEASES_ERR.lock().await = None;
+            let mut guard = MIHOMO_RELEASES_CACHE.lock().await;
+            *guard = Some((std::time::Instant::now(), fresh.clone()));
+            Ok(fresh)
+        }
+        Err(e) => {
+            *MIHOMO_RELEASES_ERR.lock().await = Some((std::time::Instant::now(), e.clone()));
+            let guard = MIHOMO_RELEASES_CACHE.lock().await;
+            if let Some((_, ref stale)) = *guard {
+                Ok(stale.clone())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-/// GET /api/mihomo/releases — список релизов ядра Mihomo
-pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
-    let cfg = state.config.read().await.clone();
+async fn fetch_mihomo_latest_light_cached(direct: &reqwest::Client, proxy_url: &str) -> Result<String, String> {
+    let ttl = Duration::from_secs(MIHOMO_RELEASES_TTL_SECS);
+    let neg_ttl = Duration::from_secs(MIHOMO_RELEASES_NEG_TTL_SECS);
+
+    {
+        let full_guard = MIHOMO_RELEASES_CACHE.lock().await;
+        if let Some((time, ref list)) = *full_guard {
+            if time.elapsed() < ttl {
+                if let Some(tag) = list.iter().find(|r| !r.prerelease && r.tag_name.starts_with('v')).map(|r| r.tag_name.clone()) {
+                    return Ok(tag);
+                }
+            }
+        }
+    }
+    {
+        let guard = MIHOMO_LIGHT_CACHE.lock().await;
+        if let Some((time, ref tag)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok(tag.clone());
+            }
+        }
+    }
+    {
+        let eguard = MIHOMO_LIGHT_ERR.lock().await;
+        if let Some((time, ref err)) = *eguard {
+            if time.elapsed() < neg_ttl {
+                let guard = MIHOMO_LIGHT_CACHE.lock().await;
+                if let Some((_, ref stale)) = *guard {
+                    return Ok(stale.clone());
+                }
+                return Err(err.clone());
+            }
+        }
+    }
+
+    let _sf = MIHOMO_LIGHT_FETCH_LOCK.lock().await;
+    {
+        let guard = MIHOMO_LIGHT_CACHE.lock().await;
+        if let Some((time, ref tag)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok(tag.clone());
+            }
+        }
+    }
+
+    let proxied = proxied_client(proxy_url);
+    let mut clients = Vec::new();
+    if let Some(ref p) = proxied {
+        clients.push(p);
+    }
+    clients.push(direct);
+
+    for http in &clients {
+        if let Ok(res) = http
+            .get(MIHOMO_LATEST_REDIRECT)
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+        {
+            let final_url = res.url().to_string();
+            if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
+                let tag = tag.trim_matches('/').to_string();
+                if !tag.is_empty() {
+                    *MIHOMO_LIGHT_ERR.lock().await = None;
+                    *MIHOMO_LIGHT_CACHE.lock().await = Some((std::time::Instant::now(), tag.clone()));
+                    return Ok(tag);
+                }
+            }
+        }
+    }
+
+    let err_msg = "Не удалось получить последнюю версию Mihomo".to_string();
+    *MIHOMO_LIGHT_ERR.lock().await = Some((std::time::Instant::now(), err_msg.clone()));
+    if let Some((_, ref stale)) = *MIHOMO_LIGHT_CACHE.lock().await {
+        return Ok(stale.clone());
+    }
+    Err(err_msg)
+}
+
+#[derive(Deserialize, Default)]
+pub struct MihomoReleasesQuery {
+    pub light: Option<String>,
+}
+
+impl MihomoReleasesQuery {
+    pub fn is_light(&self) -> bool {
+        matches!(
+            self.light.as_deref().map(str::trim),
+            Some("1" | "true" | "TRUE" | "True" | "yes")
+        )
+    }
+}
+
+/// GET /api/mihomo/releases — список релизов ядра Mihomo (или лёгкий ?light=1 для бейджа в шапке)
+pub async fn mihomo_releases(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<MihomoReleasesQuery>,
+) -> Response {
+    let cfg = state.cfg_snapshot().await;
     let proxy_url = cfg.mihomo_proxy_url();
     let arch = detect_mihomo_arch().await;
 
-    // Определяем текущую установленную версию Mihomo
+    // Определяем текущую установленную версию Mihomo (не спавним бинарник, если есть свежий кэш)
     let initial_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
 
     #[cfg(unix)]
     let (current_ver, full_ver) = {
-        let mut cur_v = initial_ver;
-        let mut full_v = cur_v.clone();
-        let bin_path = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
-        if let Ok(out) = tokio::process::Command::new(bin_path).arg("-v").output().await {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                full_v = s.clone();
-                for part in s.split_whitespace() {
-                    if part.starts_with('v') && part.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                        cur_v = part.to_string();
-                        break;
+        let mut cur_v = initial_ver.clone();
+        let mut full_v = initial_ver.clone();
+        if !query.is_light() || initial_ver.is_empty() {
+            let cached_cli = {
+                let g = MIHOMO_VER_CLI_CACHE.lock().await;
+                g.as_ref().and_then(|(t, cv, fv)| {
+                    if t.elapsed() < Duration::from_secs(60) {
+                        Some((cv.clone(), fv.clone()))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some((cv, fv)) = cached_cli {
+                if !cv.is_empty() {
+                    cur_v = cv;
+                    full_v = fv;
+                }
+            } else {
+                let bin_path = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
+                if let Ok(out) = tokio::process::Command::new(bin_path).arg("-v").output().await {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !s.is_empty() {
+                        full_v = s.clone();
+                        for part in s.split_whitespace() {
+                            if part.starts_with('v') && part.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                                cur_v = part.to_string();
+                                break;
+                            }
+                        }
+                        *MIHOMO_VER_CLI_CACHE.lock().await =
+                            Some((std::time::Instant::now(), cur_v.clone(), full_v.clone()));
                     }
                 }
             }
@@ -1669,6 +1917,19 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
     };
     #[cfg(not(unix))]
     let (current_ver, full_ver) = (initial_ver.clone(), initial_ver);
+
+    if query.is_light() {
+        let latest_version = fetch_mihomo_latest_light_cached(&state.http, &proxy_url)
+            .await
+            .unwrap_or_default();
+        return api_ok(json!({
+            "current_version": current_ver,
+            "current_full": full_ver,
+            "latest_version": latest_version,
+            "arch": arch,
+            "releases": [],
+        }));
+    }
 
     let raw_releases = match fetch_mihomo_releases_cached(&state.http, &proxy_url).await {
         Ok(r) => r,
@@ -2619,5 +2880,27 @@ mod tests {
         assert!(mihomo_version_matches_target("v1.19.2", "v1.19.2"));
         assert!(mihomo_version_matches_target("Mihomo Meta v1.19.2", "1.19.2"));
         assert!(mihomo_version_matches_target("alpha-12345", "Prerelease-Alpha"));
+    }
+
+    #[test]
+    fn regression_updater_singleflight_negative_cache_and_light_mihomo_releases() {
+        assert!(UPDATE_CHECK_TTL_SECS >= 600);
+        assert!(UPDATE_CHECK_NEG_TTL_SECS >= 120);
+        assert!(MIHOMO_RELEASES_TTL_SECS >= 900);
+        assert!(MIHOMO_RELEASES_NEG_TTL_SECS >= 180);
+        assert!(MIHOMO_REPO_RELEASES.contains("per_page=8"));
+        let src = include_str!("updater.rs");
+        assert!(src.contains("CHECK_STABLE_FETCH_LOCK") && src.contains("MIHOMO_RELEASES_FETCH_LOCK"));
+        assert!(src.contains("query.is_light()") && src.contains("MIHOMO_LATEST_REDIRECT"));
+        assert!(MihomoReleasesQuery { light: Some("1".into()) }.is_light());
+        assert!(MihomoReleasesQuery { light: Some("true".into()) }.is_light());
+        assert!(!MihomoReleasesQuery { light: Some("0".into()) }.is_light());
+        assert!(!MihomoReleasesQuery { light: None }.is_light());
+        let q1: axum::extract::Query<MihomoReleasesQuery> =
+            axum::extract::Query::try_from_uri(&"http://localhost/api/mihomo/releases?light=1".parse::<axum::http::Uri>().unwrap()).unwrap();
+        assert!(q1.0.is_light());
+        let q2: axum::extract::Query<MihomoReleasesQuery> =
+            axum::extract::Query::try_from_uri(&"http://localhost/api/mihomo/releases?light=true".parse::<axum::http::Uri>().unwrap()).unwrap();
+        assert!(q2.0.is_light());
     }
 }
